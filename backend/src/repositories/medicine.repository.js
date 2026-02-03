@@ -5,6 +5,12 @@ import levenshtein from 'fast-levenshtein';
 const medicineCache = new Map();
 const interactionCache = new Map();
 
+/** Get display name from a row (supports both 'name' and 'medicine_name' columns) */
+const getMedName = (row) => (row && (row.name || row.medicine_name)) || '';
+
+/** Column to use for name search; set MEDICINE_NAME_COLUMN=medicine_name if your table uses that */
+const NAME_COL = process.env.MEDICINE_NAME_COLUMN || 'name';
+
 export const loadMedicineData = async () => {
   // Data is now in Supabase, no need to load CSVs
   console.log('✅ Database connection ready');
@@ -150,15 +156,65 @@ const fuzzySearchMedicine = async (searchName, maxDistance = 3) => {
   }
 };
 
+/** True when the search is for Co-Amoxiclav (amoxicillin + clavulanate). */
+function isAmoxiclavSearch(options, nameLower) {
+  const term = (options.originalSearchTerm || '').toLowerCase().trim();
+  return term === 'amoxiclav' || nameLower === 'amoxicillin clavulanate';
+}
+
+/** When prescription says amoxiclav, reject plain Amoxicillin (no clavulanate). */
+function rejectPlainAmoxicillinWhenAmoxiclavRequested(medicine, options, nameLower) {
+  if (!medicine) return medicine;
+  if (!isAmoxiclavSearch(options, nameLower)) return medicine;
+  const medName = getMedName(medicine).toLowerCase();
+  if (/amoxiclav|co-amoxiclav|amoxilclav|clavulanate/i.test(medName)) return medicine;
+  return null; // prescription asked for amoxiclav; this is plain amoxicillin
+}
+
+/**
+ * Score a DB row for ranking when multiple candidates exist.
+ * Prefers: exact match > contains original term (e.g. amoxiclav) > dosage match > contains first word only.
+ * When search is amoxiclav/amoxicillin clavulanate, prefer names containing amoxiclav, co-amoxiclav, amoxilclav.
+ */
+function rankMedicineRow(med, nameLower, options = {}) {
+  const medName = getMedName(med).toLowerCase();
+  const originalTerm = (options.originalSearchTerm || '').toLowerCase().trim();
+  const dosageNum = options.prescriptionDosage != null
+    ? parseInt(String(options.prescriptionDosage).replace(/\D/g, ''), 10)
+    : null;
+  const isAmoxiclavSearch =
+    originalTerm === 'amoxiclav' ||
+    nameLower.includes('amoxicillin clavulanate') ||
+    nameLower === 'amoxicillin clavulanate';
+
+  let score = 0;
+  if (medName === nameLower) score += 1000;
+  else if (medName.includes(nameLower) || nameLower.includes(medName)) score += 400;
+  else if (medName.startsWith(nameLower) || nameLower.startsWith(medName.split(' ')[0])) score += 300;
+
+  if (originalTerm && medName.includes(originalTerm)) score += 250;
+  if (isAmoxiclavSearch && /amoxiclav|co-amoxiclav|amoxilclav|clavulanate/i.test(medName)) score += 200;
+  if (isAmoxiclavSearch && /^amoxicillin\s/i.test(medName) && !/amoxiclav|clavulanate|amoxilclav/i.test(medName)) score -= 150;
+
+  if (dosageNum && /\d+/.test(medName)) {
+    const nameNums = medName.match(/\d+/g);
+    if (nameNums && nameNums.some(n => parseInt(n, 10) === dosageNum)) score += 180;
+  }
+  const lev = levenshtein.get(nameLower, medName);
+  score -= Math.min(lev * 2, 100);
+  return score;
+}
+
 /**
  * Find medicine by name
- * Returns complete medicine object with all related data
- * Prioritizes medicine_details_extended as primary source
+ * @param {string} name - Medicine name to search
+ * @param {Object} [options] - Optional: { prescriptionDosage: '625'|'625 mg', originalSearchTerm: 'amoxiclav' } for dosage-aware and term-aware ranking
+ * @returns {Object|null} Complete medicine object or null
  */
-export const findMedicine = async (name) => {
+export const findMedicine = async (name, options = {}) => {
   if (!name) return null;
 
-  const cacheKey = name.toLowerCase();
+  const cacheKey = name.toLowerCase() + '|' + (options.prescriptionDosage || '') + '|' + (options.originalSearchTerm || '');
   if (medicineCache.has(cacheKey)) {
     return medicineCache.get(cacheKey);
   }
@@ -168,12 +224,12 @@ export const findMedicine = async (name) => {
     let medicineId = null;
 
     // Strategy 1: Search in medicine_details_extended first (PRIMARY SOURCE)
-    // Try exact match first (case-insensitive)
+    // Uses NAME_COL (default 'name'); falls back to 'medicine_name' if no results (see below)
     const nameLower = name.toLowerCase().trim();
     let { data: exactMatch, error: exactError } = await supabase
       .from('medicine_details_extended')
       .select('*')
-      .ilike('name', name)
+      .ilike(NAME_COL, name)
       .limit(1)
       .single();
 
@@ -185,28 +241,97 @@ export const findMedicine = async (name) => {
       let { data: extended, error: extError } = await supabase
         .from('medicine_details_extended')
         .select('*')
-        .ilike('name', `%${name}%`)
+        .ilike(NAME_COL, `%${name}%`)
         .limit(10);
 
+      // If no match, try dosage-normalized name (e.g. "625 mg" -> "625mg") since DB may store "Amoxiclav 625mg"
+      let nameDosageNorm = name ? name.replace(/(\d+)\s+(mg|g|ml|mcg|iu|%)/gi, '$1$2') : '';
+      if ((extError || !extended || extended.length === 0) && nameDosageNorm !== name) {
+        const { data: ext2, error: err2 } = await supabase
+          .from('medicine_details_extended')
+          .select('*')
+          .ilike(NAME_COL, `%${nameDosageNorm}%`)
+          .limit(10);
+        if (!err2 && ext2 && ext2.length > 0) {
+          extError = null;
+          extended = ext2;
+        }
+      }
+      // If still no match and search is multi-word (e.g. "amoxicillin clavulanate"), try first word so "Amoxicillin and Clavulanic Acid" matches
+      const firstWord = name && name.includes(' ') ? name.trim().split(/\s+/)[0] : '';
+      if ((extError || !extended || extended.length === 0) && firstWord.length >= 3) {
+        const { data: extFirst, error: errFirst } = await supabase
+          .from('medicine_details_extended')
+          .select('*')
+          .ilike(NAME_COL, `%${firstWord}%`)
+          .limit(10);
+        if (!errFirst && extFirst && extFirst.length > 0) {
+          extError = null;
+          extended = extFirst;
+        }
+      }
+
       if (!extError && extended && extended.length > 0) {
-        // Find best match (exact or closest)
-        extended = extended.sort((a, b) => {
-          const aName = (a.name || '').toLowerCase();
-          const bName = (b.name || '').toLowerCase();
-          const aExact = aName === nameLower;
-          const bExact = bName === nameLower;
-          if (aExact && !bExact) return -1;
-          if (!aExact && bExact) return 1;
-          // Prefer matches that start with the search term
-          const aStarts = aName.startsWith(nameLower);
-          const bStarts = bName.startsWith(nameLower);
-          if (aStarts && !bStarts) return -1;
-          if (!aStarts && bStarts) return 1;
-          return levenshtein.get(nameLower, aName) - levenshtein.get(nameLower, bName);
-        });
-        
-        medicine = extended[0];
+        // When prescription says amoxiclav, only consider products that contain clavulanate (Co-Amoxiclav)
+        if (isAmoxiclavSearch(options, nameLower)) {
+          extended = extended.filter(m => /amoxiclav|co-amoxiclav|amoxilclav|clavulanate/i.test(getMedName(m)));
+        }
+        if (extended.length > 0) {
+          extended = extended.sort((a, b) => {
+            const scoreA = rankMedicineRow(a, nameLower, options);
+            const scoreB = rankMedicineRow(b, nameLower, options);
+            return scoreB - scoreA;
+          });
+          medicine = extended[0];
+          medicineId = medicine.medicine_id;
+        }
+      }
+    }
+
+    // Strategy 1b: If no match and we used default column, try 'medicine_name' (some DBs use that column)
+    const altNameCol = 'medicine_name';
+    if (!medicine && NAME_COL === 'name') {
+      const { data: exactAlt, error: exactAltErr } = await supabase
+        .from('medicine_details_extended')
+        .select('*')
+        .ilike(altNameCol, name)
+        .limit(1)
+        .single();
+      if (!exactAltErr && exactAlt) {
+        medicine = exactAlt;
         medicineId = medicine.medicine_id;
+      } else {
+        let { data: extAlt, error: extAltErr } = await supabase
+          .from('medicine_details_extended')
+          .select('*')
+          .ilike(altNameCol, `%${name}%`)
+          .limit(10);
+        const nameDosageNorm = name ? name.replace(/(\d+)\s+(mg|g|ml|mcg|iu|%)/gi, '$1$2') : '';
+        if ((extAltErr || !extAlt || extAlt.length === 0) && nameDosageNorm !== name) {
+          const { data: extAlt2, error: errAlt2 } = await supabase
+            .from('medicine_details_extended')
+            .select('*')
+            .ilike(altNameCol, `%${nameDosageNorm}%`)
+            .limit(10);
+          if (!errAlt2 && extAlt2 && extAlt2.length > 0) {
+            extAltErr = null;
+            extAlt = extAlt2;
+          }
+        }
+        if (!extAltErr && extAlt && extAlt.length > 0) {
+          if (isAmoxiclavSearch(options, nameLower)) {
+            extAlt = extAlt.filter(m => /amoxiclav|co-amoxiclav|amoxilclav|clavulanate/i.test(getMedName(m)));
+          }
+          if (extAlt.length > 0) {
+            extAlt = extAlt.sort((a, b) => {
+              const scoreA = rankMedicineRow(a, nameLower, options);
+              const scoreB = rankMedicineRow(b, nameLower, options);
+              return scoreB - scoreA;
+            });
+            medicine = extAlt[0];
+            medicineId = medicine.medicine_id;
+          }
+        }
       }
     }
 
@@ -214,8 +339,8 @@ export const findMedicine = async (name) => {
     if (!medicine) {
       const fuzzyMatch = await fuzzySearchMedicine(name, 3);
       if (fuzzyMatch) {
-        medicine = fuzzyMatch;
-        medicineId = medicine.medicine_id;
+        medicine = rejectPlainAmoxicillinWhenAmoxiclavRequested(fuzzyMatch, options, nameLower);
+        if (medicine) medicineId = medicine.medicine_id;
       }
     }
 
@@ -255,18 +380,25 @@ export const findMedicine = async (name) => {
 
     // Strategy 4: Fallback to medicines table (last resort)
     if (!medicine) {
-      const { data: med, error } = await supabase
+      let { data: med, error } = await supabase
         .from('medicines')
         .select('*')
-        .ilike('name', `%${name}%`)
+        .ilike(NAME_COL, `%${name}%`)
         .limit(1)
         .single();
-
+      if (error && NAME_COL === 'name') {
+        const res = await supabase.from('medicines').select('*').ilike('medicine_name', `%${name}%`).limit(1).single();
+        med = res.data;
+        error = res.error;
+      }
       if (!error && med) {
         medicine = med;
         medicineId = medicine.id;
       }
     }
+
+    // When prescription says amoxiclav, never return plain Amoxicillin (no clavulanate)
+    medicine = rejectPlainAmoxicillinWhenAmoxiclavRequested(medicine, options, nameLower);
 
     if (medicine) {
       // Fetch all related data in parallel
@@ -280,7 +412,7 @@ export const findMedicine = async (name) => {
       const completeMedicine = {
         ...medicine,
         id: medicineId || medicine.id,
-        name: medicine.name,
+        name: getMedName(medicine),
         prices: prices || [],
         extended: extendedDetails || (medicine.name ? medicine : null),
         foodInteractions: foodInteractions || []

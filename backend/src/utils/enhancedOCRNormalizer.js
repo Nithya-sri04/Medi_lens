@@ -70,9 +70,16 @@ function applyOCRFixes(text) {
 
 /**
  * Fuzzy match medicine names against database
+ * getAllMedicines is async; returns null when DB unavailable.
  */
-function fuzzyMatchMedicineName(input, threshold = 3) {
-  const allMedicines = getAllMedicines();
+async function fuzzyMatchMedicineName(input, threshold = 3) {
+  let allMedicines = [];
+  try {
+    const result = await getAllMedicines();
+    allMedicines = Array.isArray(result) ? result : [];
+  } catch (e) {
+    allMedicines = [];
+  }
   const inputLower = input.toLowerCase().trim();
   
   let bestMatch = null;
@@ -80,16 +87,18 @@ function fuzzyMatchMedicineName(input, threshold = 3) {
   let bestSimilarity = 0;
   
   for (const medicine of allMedicines) {
-    const medName = medicine.medicine_name.toLowerCase();
+    const medName = (medicine.name || medicine.medicine_name || "").toLowerCase();
     
+    if (!medName) continue;
+    const displayName = medicine.name || medicine.medicine_name;
     // Exact match
     if (medName === inputLower) {
-      return { match: medicine.medicine_name, confidence: 1.0, distance: 0 };
+      return { match: displayName, confidence: 1.0, distance: 0 };
     }
     
     // Check synonyms
     if (MEDICINE_SYNONYMS[inputLower] === medName) {
-      return { match: medicine.medicine_name, confidence: 0.95, distance: 1 };
+      return { match: displayName, confidence: 0.95, distance: 1 };
     }
     
     // Levenshtein distance
@@ -98,7 +107,7 @@ function fuzzyMatchMedicineName(input, threshold = 3) {
     
     if (distance < bestDistance && distance <= threshold) {
       bestDistance = distance;
-      bestMatch = medicine.medicine_name;
+      bestMatch = displayName;
       bestSimilarity = similarity;
     }
     
@@ -110,7 +119,7 @@ function fuzzyMatchMedicineName(input, threshold = 3) {
       
       if (genericDistance < bestDistance && genericDistance <= threshold) {
         bestDistance = genericDistance;
-        bestMatch = medicine.medicine_name;
+        bestMatch = displayName;
         bestSimilarity = genericSimilarity;
       }
     }
@@ -130,7 +139,7 @@ function fuzzyMatchMedicineName(input, threshold = 3) {
 /**
  * Normalize and correct OCR text with medicine database suggestions
  */
-export function normalizeOCRText(rawText) {
+export async function normalizeOCRText(rawText) {
   if (!rawText || !rawText.trim()) {
     return { normalizedText: "", corrections: [] };
   }
@@ -154,9 +163,9 @@ export function normalizeOCRText(rawText) {
     !/^\d+[mgmlmcg]$/i.test(word)
   );
   
-  // Try to match each potential medicine word
+  // Try to match each potential medicine word (fuzzyMatchMedicineName is async)
   for (const word of medicineWords) {
-    const match = fuzzyMatchMedicineName(word);
+    const match = await fuzzyMatchMedicineName(word);
     if (match && match.confidence > 0.7) {
       const originalIndex = words.indexOf(word);
       if (originalIndex !== -1) {
@@ -182,22 +191,30 @@ export function normalizeOCRText(rawText) {
 /**
  * Get suggestions for a given text input (for auto-complete/correction)
  */
-export function getTextSuggestions(text) {
+export async function getTextSuggestions(text) {
   if (!text || text.length < 3) {
     return [];
   }
   
-  const allMedicines = getAllMedicines();
+  let allMedicines = [];
+  try {
+    const result = await getAllMedicines();
+    allMedicines = Array.isArray(result) ? result : [];
+  } catch (e) {
+    allMedicines = [];
+  }
   const suggestions = [];
   const textLower = text.toLowerCase();
   
   for (const medicine of allMedicines) {
-    const medName = medicine.medicine_name.toLowerCase();
+    const medName = (medicine.name || medicine.medicine_name || "").toLowerCase();
+    if (!medName) continue;
     
+    const displayName = medicine.name || medicine.medicine_name;
     // Check if text is a prefix
     if (medName.startsWith(textLower)) {
       suggestions.push({
-        text: medicine.medicine_name,
+        text: displayName,
         type: "prefix",
         confidence: 0.9
       });
@@ -210,7 +227,7 @@ export function getTextSuggestions(text) {
     
     if (similarity > 0.7 && distance <= 3) {
       suggestions.push({
-        text: medicine.medicine_name,
+        text: displayName,
         type: "fuzzy",
         confidence: similarity
       });

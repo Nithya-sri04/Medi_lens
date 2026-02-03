@@ -3,8 +3,10 @@ export const parseInstructions = (text) => {
     timing: [],
     foodRelation: null,
     durationDays: null,
+    durationText: null,
     frequencyText: null,
-    frequency: null
+    frequency: null,
+    isContinue: false
   };
 
   // Map for Unicode circled digits to numbers
@@ -64,10 +66,15 @@ export const parseInstructions = (text) => {
     instructions.foodRelation = "After Food";
   }
 
+  // Duration: handle "X TO CONTINUE" first so it always wins (regular daily tablet, no fixed duration)
+  if (/\bx\s+to\s+continue\b/i.test(text)) {
+    instructions.durationDays = null;
+    instructions.isContinue = true;
+    instructions.durationText = 'Continue as prescribed';
+    instructions.frequencyText = (instructions.frequencyText || '') + ' (Continue)';
+  } else {
   // Duration patterns: (5), 5 days, ×5, 5/, circled digits, etc.
-  // Also handles: "X 1 DAY", "X 7 DAYS", "X TO CONTINUE"
   const durationPatterns = [
-    /x\s+to\s+continue/i,  // X TO CONTINUE (special case - set to null or large number)
     /x\s+(\d+)\s*days?/i,  // X 1 DAY, X 7 DAYS (case insensitive)
     /×\s*(\d+)\s*days?/i,  // × 5 days
     /\((\d+)\)/,  // (5)
@@ -87,18 +94,9 @@ export const parseInstructions = (text) => {
   for (const pattern of durationPatterns) {
     const durationMatch = text.match(pattern);
     if (durationMatch) {
-      // Handle "X TO CONTINUE" - set to null or a special value
-      if (pattern.source.includes('to\\s+continue')) {
-        instructions.durationDays = null; // or set to a large number like 999
-        instructions.frequencyText = (instructions.frequencyText || '') + ' (Continue)';
-        break;
-      }
-      
       let durationValue = durationMatch[2] || durationMatch[1];
       if (durationValue) {
         durationValue = Number(durationValue);
-        
-        // Only set duration if it's a reasonable number (1-365 days)
         if (durationValue > 0 && durationValue <= 365) {
           instructions.durationDays = durationValue;
           break;
@@ -106,21 +104,22 @@ export const parseInstructions = (text) => {
       }
     }
   }
+  }
   
-  // Check for Unicode circled digits anywhere in the text
+  // Check for Unicode circled digits (only if not "to continue")
+  if (!instructions.isContinue) {
   const circledDigits = ['⓪', '①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩', '⑪', '⑫', '⑬', '⑭', '⑮', '⑯', '⑰', '⑱', '⑲', '⑳', '⓵', '⓶', '⓷', '⓸', '⓹', '⓺', '⓻', '⓼', '⓽', '⓾', '⓿', '❶', '❷', '❸', '❹', '❺', '❻', '❼', '❽', '❾', '❿', '➀', '➁', '➂', '➃', '➄', '➅', '➆', '➇', '➈', '➉'];
   const digitValues = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-  
   for (let i = 0; i < circledDigits.length; i++) {
     if (text.includes(circledDigits[i]) && digitValues[i] > 0 && digitValues[i] <= 365) {
       instructions.durationDays = digitValues[i];
       break;
     }
   }
+  }
   
-  // Additional check: look for standalone numbers that could be duration
-  // Only if no duration found yet, and the number is between 1-30
-  if (!instructions.durationDays) {
+  // Standalone numbers as duration only if no duration and not "to continue"
+  if (!instructions.durationDays && !instructions.isContinue) {
     const standaloneNumberMatch = text.match(/\b([1-9]|1[0-9]|2[0-9]|30)\b/g);
     if (standaloneNumberMatch) {
       // Take the last reasonable number as potential duration

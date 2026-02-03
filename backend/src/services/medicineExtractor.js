@@ -2,6 +2,7 @@ import { findMedicine, findInteraction, getMedicineDetails } from "../repositori
 import { extractDosage } from "../utils/dosageParser.js";
 import { parseInstructions } from "../utils/instructionParser.js";
 import { normalizeMedicineName } from "../utils/normalizeMedicineName.js";
+import { correctMedicineNameOCRTypo } from "../utils/prescriptionOCRFixes.js";
 import { verifyMedicine } from "./coreAccuracy/medicineVerificationService.js";
 import { detectGenericBrand, getMarketAlternatives } from "./coreAccuracy/genericBrandDetector.js";
 import { getFoodHabits, getFoodInteractionWarnings } from "./coreAccuracy/foodHabitsService.js";
@@ -14,9 +15,9 @@ import { getFoodHabits, getFoodInteractionWarnings } from "./coreAccuracy/foodHa
 const extractMedicinePatterns = (text) => {
   const patterns = [];
   
-  // Pattern 1: Prefix + Medicine Name + Dosage (e.g., "T.Amoxycillin 250mg", "INJ CEFAZOLIN 1G", "T.CHYMORAL FORTE")
-  // Extract the full medicine entry and parse it
-  const prefixPattern = /(?:^|\s)(?:t\.|tab\.?|tablet\.?|c\.|cap\.?|capsule\.?|inj\.?|injection\.?|syp\.?|syrup\.?|ointment\.?|oint\.?)\s+([^\d]+?)(?:\s+(\d+(?:\.\d+)?\s*(?:mg|g|ml|mcg|iu|%))|\s+(?=\d+-\d+-\d+|\d+\s*x\s*|b\/f|a\/f|l\/a|at\s|to\s+continue))/gi;
+  // Pattern 1: Prefix + Medicine Name + Dosage (e.g., "T.Amoxycillin 250mg", "C.AMOXICLAV 625 MG", "T.PAN 40 MG")
+  // \s* allows no space after prefix so "C.AMOXICLAV" and "T.PAN" match (common prescription format)
+  const prefixPattern = /(?:^|\s)(?:t\.|tab\.?|tablet\.?|c\.|cap\.?|capsule\.?|inj\.?|injection\.?|syp\.?|syrup\.?|ointment\.?|oint\.?)\s*([^\d]+?)(?:\s+(\d+(?:\.\d+)?\s*(?:mg|g|ml|mcg|iu|%))|\s+(?=\d+-\d+-\d+|\d+\s*x\s*|b\/f|a\/f|l\/a|at\s|to\s+continue))/gi;
   
   let match;
   while ((match = prefixPattern.exec(text)) !== null) {
@@ -96,22 +97,30 @@ const extractMedicinePatterns = (text) => {
   return patterns;
 };
 
+/** Extract dosage number from pattern (e.g. "625" from "amoxiclav 625 mg") for ranking */
+const extractDosageForRanking = (pattern) => {
+  const src = pattern.nameWithDosage || pattern.nameWithoutDosage || '';
+  const m = src.match(/(\d+(?:\.\d+)?)\s*(?:mg|g|ml|mcg|iu|%)/i);
+  return m ? m[1] : null;
+};
+
 /**
  * Try multiple search strategies to find a medicine
  * 1. Search with dosage (exact match) - STRICT
  * 2. Search without dosage - MODERATE
  * 3. Search normalized name - FALLBACK
- * 
- * When dosage is present, we prioritize exact/close matches to avoid wrong medicine matching
+ * Passes prescriptionDosage and originalSearchTerm for dosage-aware and amoxiclav-preferring ranking.
  */
 const findMedicineWithStrategies = async (pattern) => {
   let medicine = null;
   let matchedName = null;
-  
+  const prescriptionDosage = extractDosageForRanking(pattern);
+  const originalSearchTerm = (pattern.nameWithoutDosage || '').trim().split(/\s+/)[0] || null;
+  const rankOptions = { prescriptionDosage, originalSearchTerm };
+
   // Strategy 1: Search with dosage if available (STRICT - prioritize exact matches)
   if (pattern.nameWithDosage) {
-    // Try exact match first
-    medicine = await findMedicine(pattern.nameWithDosage);
+    medicine = await findMedicine(pattern.nameWithDosage, rankOptions);
     if (medicine) {
       const medicineName = (medicine.name || medicine.medicine_name || '').toLowerCase();
       const searchName = pattern.nameWithDosage.toLowerCase();
@@ -131,7 +140,7 @@ const findMedicineWithStrategies = async (pattern) => {
     
     for (const variation of variations) {
       if (variation !== pattern.nameWithDosage) {
-        medicine = await findMedicine(variation);
+        medicine = await findMedicine(variation, rankOptions);
         if (medicine) {
           const medicineName = (medicine.name || medicine.medicine_name || '').toLowerCase();
           const searchName = variation.toLowerCase();
@@ -148,7 +157,7 @@ const findMedicineWithStrategies = async (pattern) => {
   
   // Strategy 2: Search without dosage (MODERATE - check if name matches well)
   if (pattern.nameWithoutDosage) {
-    medicine = await findMedicine(pattern.nameWithoutDosage);
+    medicine = await findMedicine(pattern.nameWithoutDosage, rankOptions);
     if (medicine) {
       const medicineName = (medicine.name || medicine.medicine_name || '').toLowerCase();
       const searchName = pattern.nameWithoutDosage.toLowerCase();
@@ -167,7 +176,7 @@ const findMedicineWithStrategies = async (pattern) => {
   
   // Strategy 3: Search normalized name (FALLBACK - use synonym mapping)
   if (pattern.normalized && pattern.normalized.length >= 3) {
-    medicine = await findMedicine(pattern.normalized);
+    medicine = await findMedicine(pattern.normalized, rankOptions);
     if (medicine) {
       const medicineName = (medicine.name || medicine.medicine_name || '').toLowerCase();
       const searchName = pattern.normalized.toLowerCase();
@@ -183,7 +192,28 @@ const findMedicineWithStrategies = async (pattern) => {
       }
     }
   }
-  
+
+  // Strategy 4: OCR typo correction - try corrected names (e.g. amoxidav→amoxiclav, hmcee→limcee)
+  const toTry = [
+    pattern.nameWithoutDosage && correctMedicineNameOCRTypo(pattern.nameWithoutDosage),
+    pattern.normalized && correctMedicineNameOCRTypo(pattern.normalized.split(/\s+/)[0]),
+    pattern.nameWithDosage && pattern.nameWithDosage.split(/\s+/)[0] && correctMedicineNameOCRTypo(pattern.nameWithDosage.split(/\s+/)[0])
+  ].filter(Boolean);
+  const seen = new Set();
+  for (const candidate of toTry) {
+    const key = candidate.toLowerCase();
+    if (seen.has(key) || key.length < 3) continue;
+    seen.add(key);
+    medicine = await findMedicine(candidate, rankOptions);
+    if (medicine) {
+      const medicineName = (medicine.name || medicine.medicine_name || '').toLowerCase();
+      if (medicineName.includes(key) || key.includes(medicineName.split(' ')[0])) {
+        matchedName = medicine.name || medicine.medicine_name;
+        return { medicine, matchedName };
+      }
+    }
+  }
+
   return { medicine: null, matchedName: null };
 };
 
@@ -200,8 +230,8 @@ const splitIntoMedicineLines = (text) => {
   
   // If no newlines/pipes, try to split by patterns that indicate new medicine
   if (lines.length === 1) {
-    // Pattern: T./C./INJ at start of line (case insensitive)
-    const medicineLinePattern = /(?:^|\n)(?:t\.|c\.|inj\.?|tab\.?|cap\.?|tablet\.?|capsule\.?|injection\.?)\s+[^\n]+/gi;
+    // Pattern: T./C./INJ at start (optional space after prefix so "T.PAN" and "T. PAN" both match)
+    const medicineLinePattern = /(?:^|\n)(?:t\.|c\.|inj\.?|tab\.?|cap\.?|tablet\.?|capsule\.?|injection\.?)\s*[^\n]+/gi;
     const matches = text.match(medicineLinePattern);
     if (matches && matches.length > 1) {
       return matches.map(m => m.trim().replace(/^\n/, ''));

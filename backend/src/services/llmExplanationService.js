@@ -29,7 +29,7 @@ class LLMExplanationService {
 
     }
 
-    const prompt = `You are a medical explanation assistant. You will receive JSON data about medicines extracted from a prescription and their details from our database. Your task is to explain the usage of each medicine in simple, easy-to-understand words for the patient. Do not add any information not present in the provided data. Do not suggest or create medicines. Only explain based on the given data.
+    const prompt = `You are a medical explanation assistant. You will receive JSON data about medicines extracted from a prescription and their details from our database. Your task is to explain the usage of each medicine in simple, proper English that is easy for patients to understand. Do not add any information not present in the provided data. Do not suggest or create medicines. Only explain based on the given data.
 
 Input: A JSON array of medicine objects with the following structure:
 {
@@ -38,7 +38,7 @@ Input: A JSON array of medicine objects with the following structure:
   "frequency": "How many times per day (may be empty)",
   "timing": "When to take (e.g., 'Morning, Afternoon, Night') (may be empty)",
   "food_relation": "Before or After Food (may be empty)",
-  "duration": "Duration in days (may be empty)",
+  "duration": "Duration in days or 'Continue as prescribed' (may be empty)",
   "composition": "Active ingredients (may be empty)",
   "generic_name": "Generic name (may be empty)",
   "brand_type": "Generic or Branded (may be empty)",
@@ -47,13 +47,13 @@ Input: A JSON array of medicine objects with the following structure:
   "verified": "Whether verified in database (boolean)"
 }
 
-For each medicine, provide a simple explanation in 1-2 sentences. Always include the key information: name, dosage, frequency/timing, and duration if available. Only include information that is present in the data. Format your response as a JSON array of strings.
+For each medicine, provide a simple explanation in 1-2 sentences in clear, proper English. Include only: name, dosage, frequency/timing, duration (if available), and purpose if helpful. Do NOT include any warning or side-effect text in the explanation. Format your response as a JSON array of strings.
 
-Example input: [{"name": "Paracetamol", "dosage": "500mg", "frequency": "3", "timing": "Morning, Afternoon, Night", "food_relation": "Before Food", "duration": "5 days", "composition": "Paracetamol 500mg", "generic_name": "", "brand_type": "", "purpose": "", "food_habits": "", "verified": true}]
+Example input: [{"name": "Paracetamol", "dosage": "500mg", "frequency": "3", "timing": "Morning, Afternoon, Night", "food_relation": "Before Food", "duration": "5 days", "composition": "Paracetamol 500mg", "purpose": "Pain relief", "verified": true}]
 
-Example output: ["Take 500mg of Paracetamol 3 times a day in the morning, afternoon, and night, before food, for 5 days. It contains Paracetamol 500mg."]
+Example output: ["Take 500mg of Paracetamol 3 times a day in the morning, afternoon, and night, before food, for 5 days. It is used for pain relief."]
 
-Keep explanations concise, patient-friendly, and only use the provided data. If duration is specified, always include it in the explanation.`;
+Keep explanations concise, patient-friendly, in proper English. Do not mention side effects or warnings. If duration is 'Continue as prescribed', say to take it as prescribed or until the doctor advises otherwise.`;
 
     const inputJson = JSON.stringify(medicinesData);
 
@@ -162,6 +162,175 @@ Format your response as a JSON array of strings, e.g., ["Avoid alcohol while tak
       console.error('Error calling LLM for food habits enhancement:', error);
       // Return existing habits if LLM fails
       return existingFoodHabits;
+    }
+  }
+
+  /**
+   * Returns true if the warning text is only generic advice (e.g. "Most side effects... Consult your doctor" with no serious content).
+   * Such warnings are skipped and not shown.
+   */
+  _isGenericWarning(text) {
+    if (!text || text.length < 20) return true;
+    const lower = text.toLowerCase();
+    const hasGenericPhrase =
+      /most side effects do not require|consult your doctor if (they )?persist|disappear as your body adjusts/.test(lower);
+    const hasSeriousContent =
+      /allergic|allergy|seek (immediate|emergency)|stop taking|hospital|bleeding|severe|swelling (of|in) (face|throat|tongue)|difficulty (breathing|swallowing)|rash|hives|anaphylaxis|blood in|black stools|yellow (skin|eyes)|liver|kidney (failure|problem)/i.test(lower);
+    return hasGenericPhrase && !hasSeriousContent;
+  }
+
+  /**
+   * Summarize raw warning/side_effects text into 2-3 short, patient-relevant bullet points per medicine.
+   * Skips generic-only warnings (returns empty). Returns array of strings (one per medicine).
+   */
+  async summarizeWarnings(medicinesData) {
+    if (!medicinesData?.length) return medicinesData.map(() => '');
+    const warnings = medicinesData.map(m => (m.warning || m.side_effects || '').trim());
+    const skipGeneric = warnings.map(w => !w || this._isGenericWarning(w));
+    const toSummarize = warnings.map((w, i) => (skipGeneric[i] ? '' : w));
+    const allSkipped = toSummarize.every(t => !t);
+    if (allSkipped) return medicinesData.map(() => '');
+
+    if (!openai) return medicinesData.map(() => '');
+
+    const prompt = `You are a medical information assistant. You will receive a JSON array of raw "warning" or "side effects" text for medicines (one per medicine; some may be empty). For each non-empty item, return 2-3 short bullet points containing only important, patient-relevant information (e.g. when to see a doctor, serious side effects, what to avoid). Omit generic advice like "Consult your doctor if they persist" and long lists of mild effects. If the content is only general advice with no specific serious information, return an empty string for that item. For empty input items, return an empty string.
+
+Return a JSON array of strings with the same length as the input: one string per item. Each string can contain 2-3 bullet points separated by newlines, or be empty. No other text.`;
+
+    try {
+      const inputJson = JSON.stringify(toSummarize);
+      const response = await openai.chat.completions.create({
+        model: process.env.GROQ_MODEL || 'llama-3.1-8b-instant',
+        messages: [
+          { role: 'system', content: prompt },
+          { role: 'user', content: inputJson }
+        ],
+        max_tokens: 800,
+        temperature: 0.1,
+      });
+      const raw = response.choices[0].message.content.trim();
+      let parsed = [];
+      try {
+        parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed) || parsed.length !== medicinesData.length) {
+          parsed = medicinesData.map(() => '');
+        }
+      } catch {
+        parsed = medicinesData.map(() => '');
+      }
+    return skipGeneric.map((skip, i) => (skip ? '' : (parsed[i] != null ? String(parsed[i]).trim() : '')));
+    } catch (err) {
+      console.error('LLM summarizeWarnings failed:', err);
+      return medicinesData.map(() => '');
+    }
+  }
+
+  /**
+   * Simplify database safety text (pregnancy, liver, warning) into 3-4 friendly lines.
+   * Does NOT add any new information. Skips "information not available" content; never includes labels.
+   */
+  async simplifySafetyAdvice(safetyInputs) {
+    if (!safetyInputs?.length) return [];
+
+    // Remove all labels. Treat "information not available" / "consult your doctor"–only text as empty (do not pass to LLM).
+    const stripLabels = (text) => {
+      if (!text || typeof text !== 'string') return '';
+      return text
+        .replace(/,?\s*label:\s*[^.\n]*/gi, '')
+        .replace(/\blabel:\s*[^.\n]*/gi, '')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+    };
+    // True only when text is just "information not available" / "consult your doctor" with no real advice
+    const isOnlyNoInfoOrConsult = (t) => {
+      if (!t || t.length < 10) return true;
+      const lower = t.toLowerCase();
+      const hasNoInfoPhrase = /information (regarding|about).*(not available|is not available|unavailable)|data (is )?not available/i.test(lower);
+      const rest = lower
+        .replace(/information (regarding|about) the use of [^.]*\./gi, '')
+        .replace(/please consult your doctor\.?/gi, '')
+        .replace(/,?\s*label:\s*[^.\n]*/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (hasNoInfoPhrase && rest.length < 30) return true;
+      return false;
+    };
+    const toSent = (t) => {
+      const s = stripLabels((t || '').trim());
+      return isOnlyNoInfoOrConsult(s) ? '' : s;
+    };
+
+    const cleaned = safetyInputs.map(s => ({
+      pregnancy: toSent(s.pregnancy),
+      liver: toSent(s.liver),
+      warning: toSent(s.warning)
+    }));
+
+    const hasAny = cleaned.map(c => c.pregnancy || c.liver || c.warning);
+    if (hasAny.every(h => !h)) return safetyInputs.map(() => '');
+
+    if (!openai) {
+      return safetyInputs.map((_, i) => {
+        const c = cleaned[i];
+        const parts = [c.pregnancy, c.liver, c.warning].filter(Boolean);
+        return parts.length ? parts.join(' ') : '';
+      });
+    }
+
+    const prompt = `You are a medical information assistant. You receive a JSON array of safety-related text (pregnancy, liver, general advice) for medicines. Your job is to rewrite each item into 3-4 short, simple lines of safety advice.
+
+STRICT RULES:
+- Never include any labels (no "label:", "CONSULT YOUR DOCTOR", "SAFE IF PRESCRIBED", etc.). If you see them in the input, ignore them completely.
+- Do not say that "information is not available" or "data is not available". If the only content is that info is missing or "consult your doctor", output nothing for that topic (omit it).
+- Do not repeat the medicine name. Use short lines like "Liver: Usually safe when prescribed. Your doctor may adjust dose if needed."
+- Use friendly, simple language. 3-4 lines max per medicine. Empty input item → empty string output.
+
+Return a JSON array of strings, one per item, same length as input. No other text.`;
+
+    const inputJson = JSON.stringify(cleaned);
+
+    try {
+      const response = await openai.chat.completions.create({
+        model: process.env.GROQ_MODEL || 'llama-3.1-8b-instant',
+        messages: [
+          { role: 'system', content: prompt },
+          { role: 'user', content: inputJson }
+        ],
+        max_tokens: 600,
+        temperature: 0.1
+      });
+      const raw = response.choices[0].message.content.trim();
+      let parsed = [];
+      try {
+        parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed) || parsed.length !== safetyInputs.length) {
+          parsed = safetyInputs.map(() => '');
+        }
+      } catch {
+        parsed = safetyInputs.map(() => '');
+      }
+      // Post-process: remove any labels or "information not available" sentences (never add new content)
+      const cleanOutput = (str) => {
+        if (!str || typeof str !== 'string') return '';
+        return str
+          .replace(/,?\s*label:\s*[^.\n]*/gi, '')
+          .replace(/\blabel:\s*[^.\n]*/gi, '')
+          .replace(/Information regarding[^.]*?\./gi, '')
+          .replace(/[^.]*information (is )?not available[^.]*\.?/gi, '')
+          .replace(/\s{2,}/g, ' ')
+          .trim();
+      };
+      return safetyInputs.map((s, i) => {
+        const out = parsed[i] != null ? cleanOutput(String(parsed[i])) : '';
+        return out.trim();
+      });
+    } catch (err) {
+      console.error('LLM simplifySafetyAdvice failed:', err);
+      return safetyInputs.map((_, i) => {
+        const c = cleaned[i];
+        const parts = [c.pregnancy, c.liver, c.warning].filter(Boolean);
+        return parts.length ? parts.join(' ') : '';
+      });
     }
   }
 }

@@ -5,13 +5,24 @@ interface Medicine {
   instructions: {
     timing: string[];
     foodRelation: string;
-    durationDays: number;
+    durationDays: number | null;
+    durationText?: string;
     frequencyText: string;
     frequency?: string;
+    isContinue?: boolean;
   };
   purpose: string;
-  warning: string;
   alternatives: string[];
+  /** LLM-simplified safety advice (3-4 lines from DB pregnancy/liver/warning) */
+  safetyAdviceSummary?: string | null;
+  safetyAdvice?: {
+    alcohol?: string | null;
+    pregnancy?: string | null;
+    breastfeeding?: string | null;
+    driving?: string | null;
+    kidney?: string | null;
+    liver?: string | null;
+  } | null;
   verified: boolean;
   verificationMessage?: string;
   composition?: string;
@@ -103,6 +114,8 @@ export default function MedicineResult({ data }: Props) {
     }
     if (instr.durationDays) {
       parts.push(`Duration: ${instr.durationDays} days`);
+    } else if (instr.isContinue || instr.durationText) {
+      parts.push(`Duration: ${instr.durationText || 'Continue as prescribed'}`);
     }
     return parts.join('; ') || 'Not specified';
   };
@@ -257,11 +270,18 @@ export default function MedicineResult({ data }: Props) {
                 </div>
               )}
 
-              {/* Medicine Warning */}
-              {med.warning && (
-                <div className="mt-2 mb-2 p-2 bg-orange-100 border border-orange-300 rounded">
-                  <p className="text-orange-800">
-                    <strong>⚠️ Warning:</strong> {med.warning}
+              {/* Safety advice: LLM-simplified from DB (pregnancy, liver, warning) — friendly, 3-4 lines */}
+              {(med.safetyAdviceSummary?.trim() || med.safetyAdvice?.pregnancy || med.safetyAdvice?.liver) && (
+                <div className="mt-2 mb-2 p-3 bg-sky-50 border border-sky-200 rounded">
+                  <p className="font-semibold text-sky-800 mb-1">Safety advice</p>
+                  <p className="text-sky-700 text-sm whitespace-pre-line">
+                    {med.safetyAdviceSummary?.trim() || (
+                      <>
+                        {med.safetyAdvice?.pregnancy && <span>{med.safetyAdvice.pregnancy}</span>}
+                        {med.safetyAdvice?.pregnancy && med.safetyAdvice?.liver && '\n'}
+                        {med.safetyAdvice?.liver && <span>{med.safetyAdvice.liver}</span>}
+                      </>
+                    )}
                   </p>
                 </div>
               )}

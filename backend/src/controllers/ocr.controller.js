@@ -13,7 +13,7 @@ export const normalizeOCR = async (req, res) => {
   }
 
   try {
-    const result = normalizeOCRText(text);
+    const result = await normalizeOCRText(text);
     return res.json(result);
   } catch (error) {
     console.error("OCR Normalization Error:", error);
@@ -37,7 +37,7 @@ export const getSuggestions = async (req, res) => {
   }
 
   try {
-    const suggestions = getTextSuggestions(text);
+    const suggestions = await getTextSuggestions(text);
     return res.json({ suggestions });
   } catch (error) {
     console.error("Suggestions Error:", error);
