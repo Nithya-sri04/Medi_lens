@@ -2,7 +2,7 @@ import { findMedicine, findInteraction, getMedicineDetails } from "../repositori
 import { extractDosage } from "../utils/dosageParser.js";
 import { parseInstructions } from "../utils/instructionParser.js";
 import { normalizeMedicineName } from "../utils/normalizeMedicineName.js";
-import { correctMedicineNameOCRTypo } from "../utils/prescriptionOCRFixes.js";
+import { correctMedicineNameOCRTypo, applyPrescriptionOCRFixes } from "../utils/prescriptionOCRFixes.js";
 import { verifyMedicine } from "./coreAccuracy/medicineVerificationService.js";
 import { detectGenericBrand, getMarketAlternatives } from "./coreAccuracy/genericBrandDetector.js";
 import { getFoodHabits, getFoodInteractionWarnings } from "./coreAccuracy/foodHabitsService.js";
@@ -16,8 +16,8 @@ const extractMedicinePatterns = (text) => {
   const patterns = [];
   
   // Pattern 1: Prefix + Medicine Name + Dosage (e.g., "T.Amoxycillin 250mg", "C.AMOXICLAV 625 MG", "T.PAN 40 MG")
-  // \s* allows no space after prefix so "C.AMOXICLAV" and "T.PAN" match (common prescription format)
-  const prefixPattern = /(?:^|\s)(?:t\.|tab\.?|tablet\.?|c\.|cap\.?|capsule\.?|inj\.?|injection\.?|syp\.?|syrup\.?|ointment\.?|oint\.?)\s*([^\d]+?)(?:\s+(\d+(?:\.\d+)?\s*(?:mg|g|ml|mcg|iu|%))|\s+(?=\d+-\d+-\d+|\d+\s*x\s*|b\/f|a\/f|l\/a|at\s|to\s+continue))/gi;
+  // \s* allows no space after prefix. Lookahead also allows [lo]-[lo]-[lo] (OCR: 1-0-0 as l-o-o) and "to conhnue"/"to continue"
+  const prefixPattern = /(?:^|\s)(?:t\.|tab\.?|tablet\.?|c\.|cap\.?|capsule\.?|inj\.?|injection\.?|syp\.?|syrup\.?|ointment\.?|oint\.?)\s*([^\d]+?)(?:\s+(\d+(?:\.\d+)?\s*(?:mg|g|ml|mcg|iu|%))|\s+(?=\d+-\d+-\d+|[lo]-[lo]-[lo]|\d+\s*x\s*|b\/f|a\/f|l\/a|at\s|to\s+(?:continue|conhnue|continne)))/gi;
   
   let match;
   while ((match = prefixPattern.exec(text)) !== null) {
@@ -244,15 +244,18 @@ const splitIntoMedicineLines = (text) => {
 export const extractMedicines = async (normalizedText) => {
   const results = [];
   const seen = new Set(); // Track processed medicine names
+
+  // Re-apply OCR fixes so l-o-o → 1-0-0, conhnue → continue even if caller passed raw text
+  const textForExtraction = applyPrescriptionOCRFixes(normalizedText);
   
   // Split text into individual medicine lines
-  const medicineLines = splitIntoMedicineLines(normalizedText);
+  const medicineLines = splitIntoMedicineLines(textForExtraction);
   
   console.log('Split into medicine lines:', medicineLines);
   
   // Process each medicine line separately
   for (const line of medicineLines) {
-    // Extract medicine patterns from this line only
+    // Extract medicine patterns from this line (OCR fixes already applied to full text)
     const medicinePatterns = extractMedicinePatterns(line);
     
     if (medicinePatterns.length === 0) {

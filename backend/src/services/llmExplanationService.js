@@ -226,18 +226,54 @@ Return a JSON array of strings with the same length as the input: one string per
   }
 
   /**
+   * Format raw DB safety text (pregnancy, liver) into short, clean lines without labels or medicine name.
+   * Use when LLM is unavailable or returns empty. No new information added.
+   */
+  formatSafetyAdviceFromRaw(pregnancy, liver, medicineName = '') {
+    const strip = (t) => {
+      if (!t || typeof t !== 'string') return '';
+      return t
+        .replace(/,?\s*label:\s*[^\n]*/gi, '')
+        .replace(/\blabel:\s*[^\n]*/gi, '')
+        .replace(/\b(CONSULT YOUR DOCTOR|SAFE IF PRESCRIBED|CAUTION|NOT RECOMMENDED)\b[,.]?\s*/gi, '')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+    };
+    const removeMedicineName = (s, name) => {
+      if (!name || !s) return s;
+      const re = new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+      return s.replace(re, 'This medicine').trim();
+    };
+    const firstSentence = (s, maxLen = 80) => {
+      if (!s) return '';
+      s = s.replace(/Please consult your doctor\.?/gi, 'Ask your doctor.').trim();
+      const dot = s.indexOf('.');
+      if (dot > 0 && dot <= maxLen) return s.slice(0, dot + 1).trim();
+      if (s.length > maxLen) return s.slice(0, maxLen).replace(/\s+\S*$/, '') + '.';
+      return s;
+    };
+    const p = firstSentence(removeMedicineName(strip((pregnancy || '').trim()), medicineName));
+    const l = firstSentence(removeMedicineName(strip((liver || '').trim()), medicineName));
+    const lines = [];
+    if (p) lines.push('Pregnancy: ' + p);
+    if (l) lines.push('Liver: ' + l);
+    return lines.length ? lines.join('\n') : '';
+  }
+
+  /**
    * Simplify database safety text (pregnancy, liver, warning) into 3-4 friendly lines.
    * Does NOT add any new information. Skips "information not available" content; never includes labels.
    */
   async simplifySafetyAdvice(safetyInputs) {
     if (!safetyInputs?.length) return [];
 
-    // Remove all labels. Treat "information not available" / "consult your doctor"–only text as empty (do not pass to LLM).
+    // Remove all labels and metadata (CONSULT YOUR DOCTOR, SAFE IF PRESCRIBED, CAUTION, etc.)
     const stripLabels = (text) => {
       if (!text || typeof text !== 'string') return '';
       return text
-        .replace(/,?\s*label:\s*[^.\n]*/gi, '')
-        .replace(/\blabel:\s*[^.\n]*/gi, '')
+        .replace(/,?\s*label:\s*[^\n.]*/gi, '')
+        .replace(/\blabel:\s*[^\n]*/gi, '')
+        .replace(/\b(CONSULT YOUR DOCTOR|SAFE IF PRESCRIBED|CAUTION|NOT RECOMMENDED)\b[,.]?\s*/gi, '')
         .replace(/\s{2,}/g, ' ')
         .trim();
     };
@@ -277,15 +313,28 @@ Return a JSON array of strings with the same length as the input: one string per
       });
     }
 
-    const prompt = `You are a medical information assistant. You receive a JSON array of safety-related text (pregnancy, liver, general advice) for medicines. Your job is to rewrite each item into 3-4 short, simple lines of safety advice.
+    const prompt = `You are a medical information assistant. You receive a JSON array of safety-related text (pregnancy, liver, general advice) for medicines.
 
-STRICT RULES:
-- Never include any labels (no "label:", "CONSULT YOUR DOCTOR", "SAFE IF PRESCRIBED", etc.). If you see them in the input, ignore them completely.
-- Do not say that "information is not available" or "data is not available". If the only content is that info is missing or "consult your doctor", output nothing for that topic (omit it).
-- Do not repeat the medicine name. Use short lines like "Liver: Usually safe when prescribed. Your doctor may adjust dose if needed."
-- Use friendly, simple language. 3-4 lines max per medicine. Empty input item → empty string output.
+TASK: For each item, output 2–4 SHORT lines. Each line must be ONE of these labels followed by ONE short sentence:
+- "Pregnancy:" (only if pregnancy info exists)
+- "Liver:" (only if liver info exists)
+- Do not repeat the same idea. Do not say "Ask your doctor" more than once per item. Do not mention the medicine name.
+- Use simple, reassuring language. Empty input → empty string.
 
-Return a JSON array of strings, one per item, same length as input. No other text.`;
+FORMAT RULES:
+- One line per topic. Use a newline between lines (e.g. "Pregnancy: ...\\nLiver: ...").
+- Each line = label + one short sentence (max 10–12 words per sentence).
+- No labels/tags like "CONSULT YOUR DOCTOR" or "CAUTION" in the text.
+- Do not repeat "Your doctor will weigh benefits and risks" if you already said "Ask your doctor."
+
+GOOD (short, clear, no repetition):
+"Pregnancy: May not be safe; limited data. Ask your doctor.
+Liver: Use with caution; dose may need adjustment."
+
+BAD (too long, repetitive):
+"Pregnancy: May not be safe; limited studies. Ask your doctor. The developing baby may be harmed. Your doctor will weigh the benefits and risks."
+
+Return ONLY a JSON array of strings. One string per input item. Same length as input. No other text.`;
 
     const inputJson = JSON.stringify(cleaned);
 
@@ -309,28 +358,36 @@ Return a JSON array of strings, one per item, same length as input. No other tex
       } catch {
         parsed = safetyInputs.map(() => '');
       }
-      // Post-process: remove any labels or "information not available" sentences (never add new content)
+      // Post-process: strip labels, redundant phrases, and normalize formatting
       const cleanOutput = (str) => {
         if (!str || typeof str !== 'string') return '';
-        return str
-          .replace(/,?\s*label:\s*[^.\n]*/gi, '')
-          .replace(/\blabel:\s*[^.\n]*/gi, '')
+        let out = str
+          .replace(/,?\s*label:\s*[^\n]*/gi, '')
+          .replace(/\blabel:\s*[^\n]*/gi, '')
+          .replace(/\b(CONSULT YOUR DOCTOR|SAFE IF PRESCRIBED|CAUTION|NOT RECOMMENDED)\b[,.]?\s*/gi, '')
           .replace(/Information regarding[^.]*?\./gi, '')
           .replace(/[^.]*information (is )?not available[^.]*\.?/gi, '')
+          .replace(/Please consult your doctor\.?/gi, 'Ask your doctor.')
           .replace(/\s{2,}/g, ' ')
           .trim();
+        // Remove repetitive follow-up sentences (e.g. "Your doctor will weigh the benefits and risks" after "Ask your doctor")
+        out = out.replace(/\.\s*Your doctor will weigh the benefits and risks\.?/gi, '.');
+        out = out.replace(/\.\s*The developing baby may be harmed\.?\s*/gi, '. ');
+        // Ensure one newline between Pregnancy/Liver lines, no run-on
+        out = out.replace(/\s*\.\s*(Pregnancy:|Liver:)/gi, '\n$1').replace(/\n{2,}/g, '\n').trim();
+        return out;
       };
       return safetyInputs.map((s, i) => {
-        const out = parsed[i] != null ? cleanOutput(String(parsed[i])) : '';
+        const raw = parsed[i];
+        let str = '';
+        if (typeof raw === 'string') str = raw;
+        else if (raw && typeof raw === 'object') str = raw.text ?? raw.summary ?? raw.content ?? Object.values(raw).find(v => typeof v === 'string') ?? '';
+        const out = cleanOutput(str);
         return out.trim();
       });
     } catch (err) {
       console.error('LLM simplifySafetyAdvice failed:', err);
-      return safetyInputs.map((_, i) => {
-        const c = cleaned[i];
-        const parts = [c.pregnancy, c.liver, c.warning].filter(Boolean);
-        return parts.length ? parts.join(' ') : '';
-      });
+      return safetyInputs.map(() => ''); // Controller will use formatSafetyAdviceFromRaw fallback
     }
   }
 }

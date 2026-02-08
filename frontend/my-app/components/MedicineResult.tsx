@@ -67,6 +67,7 @@ interface Props {
     disclaimer?: string;
     warning?: string;
     rawText?: string;
+    extractedText?: string;
     explanations?: string[];
   };
 }
@@ -81,7 +82,7 @@ export default function MedicineResult({ data }: Props) {
         <div className="bg-yellow-50 p-4 rounded border border-yellow-200">
           <h3 className="font-bold text-lg text-yellow-800">No Known Medicines Found</h3>
           <p className="text-yellow-700">The prescription text did not contain any recognized medicines. Please check the spelling or try re-entering the text.</p>
-          <p className="text-sm text-gray-600 mt-2">Extracted text: {data.rawText}</p>
+          <p className="text-sm text-gray-600 mt-2">Extracted text: {data.extractedText || data.rawText}</p>
         </div>
         {data.confidence !== undefined && (
           <div className="bg-blue-50 p-4 rounded">
@@ -271,20 +272,27 @@ export default function MedicineResult({ data }: Props) {
               )}
 
               {/* Safety advice: LLM-simplified from DB (pregnancy, liver, warning) — friendly, 3-4 lines */}
-              {(med.safetyAdviceSummary?.trim() || med.safetyAdvice?.pregnancy || med.safetyAdvice?.liver) && (
-                <div className="mt-2 mb-2 p-3 bg-sky-50 border border-sky-200 rounded">
-                  <p className="font-semibold text-sky-800 mb-1">Safety advice</p>
-                  <p className="text-sky-700 text-sm whitespace-pre-line">
-                    {med.safetyAdviceSummary?.trim() || (
-                      <>
-                        {med.safetyAdvice?.pregnancy && <span>{med.safetyAdvice.pregnancy}</span>}
-                        {med.safetyAdvice?.pregnancy && med.safetyAdvice?.liver && '\n'}
-                        {med.safetyAdvice?.liver && <span>{med.safetyAdvice.liver}</span>}
-                      </>
-                    )}
-                  </p>
-                </div>
-              )}
+              {(() => {
+                const summary = typeof med.safetyAdviceSummary === 'string' ? med.safetyAdviceSummary.trim() : '';
+                const pregnancy = typeof med.safetyAdvice?.pregnancy === 'string' ? med.safetyAdvice.pregnancy : '';
+                const liver = typeof med.safetyAdvice?.liver === 'string' ? med.safetyAdvice.liver : '';
+                const hasSafety = summary || pregnancy || liver;
+                if (!hasSafety) return null;
+                return (
+                  <div className="mt-2 mb-2 p-3 bg-sky-50 border border-sky-200 rounded">
+                    <p className="font-semibold text-sky-800 mb-1">Safety advice</p>
+                    <p className="text-sky-700 text-sm whitespace-pre-line">
+                      {summary || (
+                        <>
+                          {pregnancy && <span>{pregnancy}</span>}
+                          {pregnancy && liver && '\n'}
+                          {liver && <span>{liver}</span>}
+                        </>
+                      )}
+                    </p>
+                  </div>
+                );
+              })()}
 
               {/* Alternatives */}
               {med.alternatives && Array.isArray(med.alternatives) && med.alternatives.length > 0 && (

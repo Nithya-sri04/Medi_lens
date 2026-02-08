@@ -18,9 +18,13 @@ export const parseInstructions = (text) => {
     '➀': 1, '➁': 2, '➂': 3, '➃': 4, '➄': 5, '➅': 6, '➆': 7, '➇': 8, '➈': 9, '➉': 10
   };
 
-  // 1-0-1 / 1-1-1 pattern (Morning-Afternoon-Night)
+  // 1-0-1 / 1-1-1 pattern (Morning-Afternoon-Night); allow OCR l/o as 1/0
+  let normalizedForTiming = text.replace(/\b([lo])-([lo])-([lo])\b/gi, (_, a, b, c) => {
+    const n = (x) => (String(x).toLowerCase() === 'l' ? '1' : '0');
+    return `${n(a)}-${n(b)}-${n(c)}`;
+  });
   const pattern101 = /(\d)-(\d)-(\d)/;
-  const match = text.match(pattern101);
+  const match = normalizedForTiming.match(pattern101);
 
   if (match) {
     const [fullMatch, morning, afternoon, night] = match;
@@ -66,8 +70,8 @@ export const parseInstructions = (text) => {
     instructions.foodRelation = "After Food";
   }
 
-  // Duration: handle "X TO CONTINUE" first so it always wins (regular daily tablet, no fixed duration)
-  if (/\bx\s+to\s+continue\b/i.test(text)) {
+  // Duration: handle "X TO CONTINUE" first (include OCR typos: conhnue, continne)
+  if (/\bx\s+to\s+(?:continue|conhnue|continne)\b/i.test(text)) {
     instructions.durationDays = null;
     instructions.isContinue = true;
     instructions.durationText = 'Continue as prescribed';

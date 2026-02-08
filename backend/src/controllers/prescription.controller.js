@@ -21,6 +21,7 @@ export const analyzePrescription = async (req, res) => {
     return res.json({
       warning: "NO_KNOWN_MEDICINES_FOUND",
       rawText: text,
+      extractedText: normalized,
       disclaimer: "This is not medical advice. Consult a healthcare professional.",
       confidence: 0
     });
@@ -123,12 +124,39 @@ export const analyzePrescription = async (req, res) => {
     console.error('LLM simplifySafetyAdvice failed:', e);
   }
 
-  // Strip raw warning/sideEffects from response; add LLM-simplified safety advice only
+  // Strip raw warning/sideEffects; add formatted safety advice (LLM or fallback formatter); never send raw DB text
   const medicinesForResponse = enrichedMedicines.map((med, i) => {
     const { warning, warningSummary, sideEffects, ...rest } = med;
+    let summary = safetyAdviceSummaries[i];
+    if (summary != null && typeof summary !== 'string') {
+      summary = summary?.text ?? summary?.summary ?? summary?.content ?? null;
+    }
+    if (typeof summary !== 'string' || summary === '[object Object]') summary = null;
+    const hasRawSafety = med.safetyAdvice?.pregnancy || med.safetyAdvice?.liver;
+    const formatRaw = () => hasRawSafety
+      ? llmExplanationService.formatSafetyAdviceFromRaw(med.safetyAdvice?.pregnancy, med.safetyAdvice?.liver, med.name)
+      : '';
+    // Use fallback formatter when: no summary, or summary still has labels, or summary is long/unformatted
+    if (!summary?.trim()) {
+      summary = formatRaw();
+    } else if (typeof summary === 'string') {
+      summary = summary
+        .replace(/,?\s*label:\s*[^\n]*/gi, '')
+        .replace(/\blabel:\s*[^\n]*/gi, '')
+        .replace(/\b(CONSULT YOUR DOCTOR|SAFE IF PRESCRIBED|CAUTION|NOT RECOMMENDED)\b[,.]?\s*/gi, '')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+      const stillHasLabels = /label:|CONSULT YOUR DOCTOR|CAUTION/i.test(summary);
+      const looksUnformatted = summary.length > 220 && !/^Pregnancy:\s/m && !/^Liver:\s/m;
+      if (stillHasLabels || looksUnformatted) summary = formatRaw();
+      if (summary && med.name) {
+        const nameRe = new RegExp(med.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+        summary = summary.replace(nameRe, 'This medicine').replace(/\s{2,}/g, ' ').trim();
+      }
+    }
     return {
       ...rest,
-      safetyAdviceSummary: safetyAdviceSummaries[i] || null
+      safetyAdviceSummary: summary?.trim() || null
     };
   });
 
