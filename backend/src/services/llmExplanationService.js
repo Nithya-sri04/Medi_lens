@@ -69,18 +69,30 @@ Keep explanations concise, patient-friendly, in proper English. Do not mention s
         temperature: 0.1, // Low temperature for consistency
       });
 
-      const rawResponse = response.choices[0].message.content.trim();
+      let rawResponse = response.choices[0].message.content.trim();
+      // Groq sometimes returns trailing text after the JSON array; extract just the array
+      const firstBracket = rawResponse.indexOf('[');
+      if (firstBracket >= 0) {
+        const lastBracket = rawResponse.lastIndexOf(']');
+        if (lastBracket > firstBracket) {
+          rawResponse = rawResponse.slice(firstBracket, lastBracket + 1);
+        }
+      }
       console.log('Groq API raw response:', rawResponse);
       let explanations;
       try {
         explanations = JSON.parse(rawResponse);
         if (!Array.isArray(explanations)) {
-          console.error('LLM returned non-array response:', explanations);
-          throw new Error('Invalid response format');
+          explanations = [String(explanations)];
         }
       } catch (parseError) {
         console.error('Failed to parse LLM response:', parseError);
-        throw new Error('Failed to parse explanations');
+        // Fallback: treat single-line response as one explanation
+        if (rawResponse.length > 0 && rawResponse.length < 500) {
+          explanations = [rawResponse.replace(/^["']|["']$/g, '')];
+        } else {
+          throw new Error('Failed to parse explanations');
+        }
       }
       console.log('Parsed explanations:', explanations);
       return explanations;

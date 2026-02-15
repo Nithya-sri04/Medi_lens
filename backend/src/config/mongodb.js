@@ -6,6 +6,21 @@ const DB_NAME = process.env.MONGODB_DB_NAME || 'medilens';
 let client = null;
 let db = null;
 
+export function isMongoConnectionError(err) {
+  const msg = String(err?.message || '').toLowerCase();
+  const code = String(err?.code || '');
+  return (
+    msg.includes('mongoserverselectionerror') ||
+    msg.includes('ssl') ||
+    msg.includes('tls') ||
+    msg.includes('replicasetnoprimary') ||
+    msg.includes('server selection') ||
+    code === 'ECONNREFUSED' ||
+    code === 'ENOTFOUND' ||
+    code === 'ETIMEDOUT'
+  );
+}
+
 /**
  * Get MongoDB database instance. Connects on first call.
  */

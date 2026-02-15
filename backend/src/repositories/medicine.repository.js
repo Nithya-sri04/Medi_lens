@@ -5,6 +5,10 @@ import levenshtein from 'fast-levenshtein';
 const medicineCache = new Map();
 const interactionCache = new Map();
 
+// Throttle "get all medicines" failure logs (avoids spam when Supabase is unreachable)
+let lastGetAllMedicinesErrorLog = 0;
+const GET_ALL_MEDICINES_ERROR_LOG_INTERVAL_MS = 60000; // 1 minute
+
 /** Get display name from a row (supports both 'name' and 'medicine_name' columns) */
 const getMedName = (row) => (row && (row.name || row.medicine_name)) || '';
 
@@ -200,6 +204,20 @@ function rankMedicineRow(med, nameLower, options = {}) {
     const nameNums = medName.match(/\d+/g);
     if (nameNums && nameNums.some(n => parseInt(n, 10) === dosageNum)) score += 180;
   }
+
+  // Prefer matching dosage form: e.g. if prescription says "ointment", boost ointments and penalise tablets
+  const preferredForm = (options.preferredForm || '').toLowerCase();
+  if (preferredForm) {
+    if (medName.includes(preferredForm)) {
+      score += 300; // strong boost for matching form
+    } else {
+      // Penalise wrong form (e.g. tablet when ointment wanted)
+      const forms = ['tablet', 'capsule', 'injection', 'syrup', 'ointment', 'cream', 'gel', 'drops', 'lotion', 'suspension', 'dry syrup'];
+      const hasOtherForm = forms.some(f => f !== preferredForm && medName.includes(f));
+      if (hasOtherForm) score -= 200;
+    }
+  }
+
   const lev = levenshtein.get(nameLower, medName);
   score -= Math.min(lev * 2, 100);
   return score;
@@ -470,7 +488,8 @@ export const findInteraction = async (med1, med2) => {
 };
 
 /**
- * Get all medicines (for duplicate detection)
+ * Get all medicines (for duplicate detection and OCR normalizer).
+ * Logs connection errors at most once per minute to avoid console spam when Supabase is unreachable.
  */
 export const getAllMedicines = async () => {
   try {
@@ -479,13 +498,22 @@ export const getAllMedicines = async () => {
       .select('name, composition');
 
     if (error) {
-      console.error('Error getting all medicines:', error);
+      const now = Date.now();
+      if (now - lastGetAllMedicinesErrorLog >= GET_ALL_MEDICINES_ERROR_LOG_INTERVAL_MS) {
+        lastGetAllMedicinesErrorLog = now;
+        console.error('Error getting all medicines:', error.message || error, '(check Supabase URL and network)');
+      }
       return [];
     }
 
     return medicines || [];
   } catch (error) {
-    console.error('Database error:', error);
+    const now = Date.now();
+    if (now - lastGetAllMedicinesErrorLog >= GET_ALL_MEDICINES_ERROR_LOG_INTERVAL_MS) {
+      lastGetAllMedicinesErrorLog = now;
+      const msg = error?.message || String(error);
+      console.error('Supabase unreachable (getAllMedicines):', msg.includes('ENOTFOUND') ? 'DNS/network or wrong SUPABASE_URL' : msg);
+    }
     return [];
   }
 };
@@ -563,6 +591,139 @@ export const getFoodInteractions = async (medicineIdentifier, isId = false) => {
 };
 
 /**
+ * Get full medicine object by medicine_id (same shape as findMedicine).
+ * Used for composition-based lookup (e.g. same drug, different brand like Limcee/Limcor).
+ */
+export const getMedicineById = async (medicineId) => {
+  if (!medicineId) return null;
+  try {
+    const [medicine, prices, foodInteractions] = await Promise.all([
+      getMedicineDetailsExtendedByMedicineId(medicineId),
+      getMedicinePricesByMedicineId(medicineId),
+      getFoodInteractionsByMedicineId(medicineId)
+    ]);
+    if (!medicine) return null;
+    return {
+      ...medicine,
+      id: medicineId,
+      name: getMedName(medicine),
+      prices: prices || [],
+      extended: medicine,
+      foodInteractions: foodInteractions || []
+    };
+  } catch (error) {
+    console.error('Error in getMedicineById:', error);
+    return null;
+  }
+};
+
+/** Composition aliases: if DB has no results for primary name, try these (same drug, different label). */
+const COMPOSITION_ALIASES = {
+  'ascorbic acid': ['vitamin c'],
+  'vitamin c': ['ascorbic acid'],
+  'paracetamol': ['acetaminophen'],
+  'acetaminophen': ['paracetamol']
+};
+
+/**
+ * Find a medicine by composition (e.g. "Vitamin C", "Ascorbic Acid").
+ * Prefers a specific dosage form when provided (e.g. "Tablet" when prefix is "t.").
+ * Tries composition aliases if primary returns 0 results (e.g. DB may store "Vitamin C" not "Ascorbic Acid").
+ */
+export const findMedicineByComposition = async (composition, preferredForm = null) => {
+  if (!composition || typeof composition !== 'string') return null;
+  try {
+    console.log(`🔍 findMedicineByComposition: searching for "${composition}", preferredForm="${preferredForm}"`);
+    let prices = await searchMedicinePrices(null, composition.trim());
+    console.log(`  → Found ${prices?.length || 0} initial results for "${composition}"`);
+
+    // If no results, try aliases (e.g. DB stores "Vitamin C" but we searched "Ascorbic Acid")
+    const compLower = composition.toLowerCase().trim();
+    let searchTerm = compLower; // term we actually got results with (for filtering)
+    if ((!prices || prices.length === 0) && COMPOSITION_ALIASES[compLower]) {
+      for (const alias of COMPOSITION_ALIASES[compLower]) {
+        console.log(`  → Trying alias "${alias}"`);
+        prices = await searchMedicinePrices(null, alias);
+        if (prices && prices.length > 0) {
+          console.log(`  → Found ${prices.length} results for alias "${alias}"`);
+          searchTerm = alias.toLowerCase().trim();
+          break;
+        }
+      }
+    }
+    if (!prices || prices.length === 0) return null;
+
+    // STRICT FILTERING: Only keep results where composition matches search term
+    // This prevents "Vitamin C" from matching "Vitamin A" or multi-vitamin products
+    const compWords = searchTerm.split(/\s+/);
+    
+    const filtered = prices.filter(p => {
+      const comp1 = (p.short_composition1 || '').toLowerCase();
+      const comp2 = (p.short_composition2 || '').toLowerCase();
+      
+      // Exact match (case-insensitive)
+      if (comp1 === searchTerm || comp2 === searchTerm) return true;
+      
+      // For multi-word compositions (e.g. "Vitamin C"), check if ALL words appear
+      // This handles "Ascorbic Acid (Vitamin C)" but rejects "Vitamin A"
+      if (compWords.length > 1) {
+        const allWordsIn1 = compWords.every(w => comp1.includes(w));
+        const allWordsIn2 = compWords.every(w => comp2.includes(w));
+        if (allWordsIn1 || allWordsIn2) return true;
+      }
+      
+      // Single-word match: check if it appears as a standalone word (word boundary)
+      if (compWords.length === 1) {
+        const word = compWords[0];
+        const regex = new RegExp(`\\b${word}\\b`, 'i');
+        if (regex.test(comp1) || regex.test(comp2)) return true;
+      }
+      
+      return false;
+    });
+
+    console.log(`  → After strict filtering: ${filtered.length} results`);
+    if (filtered.length > 0) {
+      console.log(`  → Sample results: ${filtered.slice(0, 3).map(p => `"${p.name}" (${p.short_composition1})`).join(', ')}`);
+    }
+    if (filtered.length === 0) {
+      console.log(`  ⚠️ No results after filtering. Original results had: ${prices.slice(0, 3).map(p => `"${p.name}" (comp1="${p.short_composition1}", comp2="${p.short_composition2}")`).join(', ')}`);
+      return null;
+    }
+
+    // Prefer dosage form when specified (e.g. Tablet over Injection for "t.limcee")
+    const formLower = preferredForm ? preferredForm.toLowerCase() : null;
+    const orderToTry = formLower
+      ? [...filtered].sort((a, b) => {
+          const aHas = (a.name || '').toLowerCase().includes(formLower);
+          const bHas = (b.name || '').toLowerCase().includes(formLower);
+          if (aHas && !bHas) return -1;
+          if (!aHas && bHas) return 1;
+          return 0;
+        })
+      : filtered;
+
+    // getMedicineById can return null if medicine_details_extended has no row for this medicine_id
+    for (const priceRow of orderToTry) {
+      const medicineId = priceRow.medicine_id;
+      if (!medicineId) continue;
+      const medicine = await getMedicineById(medicineId);
+      if (medicine) {
+        if (formLower && (medicine.name || '').toLowerCase().includes(formLower)) {
+          console.log(`  ✅ Found medicine with preferred form "${preferredForm}": "${medicine.name}"`);
+        }
+        return medicine;
+      }
+    }
+    console.log(`  ⚠️ getMedicineById returned null for all ${orderToTry.length} price rows`);
+    return null;
+  } catch (error) {
+    console.error('Error in findMedicineByComposition:', error);
+    return null;
+  }
+};
+
+/**
  * Search medicine prices by name and/or composition
  * Used for finding alternative medicines with lower prices
  * @param {string} medicineName - Medicine name to search
@@ -571,12 +732,13 @@ export const getFoodInteractions = async (medicineIdentifier, isId = false) => {
  */
 export const searchMedicinePrices = async (medicineName, composition = null) => {
   try {
+    const queryLimit = (!medicineName && composition) ? 200 : 20;
     let query = supabase
       .from('medicine_prices')
       .select('*')
       .eq('is_discontinued', false)
       .order('price', { ascending: true })
-      .limit(20);
+      .limit(queryLimit);
 
     // Build search conditions
     const conditions = [];

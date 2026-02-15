@@ -118,11 +118,6 @@ export const getMarketAlternatives = async (medicine, allMedicines) => {
         continue;
       }
 
-      // Only include if cheaper than current medicine (if price available)
-      if (currentPrice && price.price >= currentPrice) {
-        continue;
-      }
-
       // Extract composition for display
       const composition = price.short_composition1 || price.short_composition2 || '';
 
@@ -133,7 +128,8 @@ export const getMarketAlternatives = async (medicine, allMedicines) => {
         packSize: price.pack_size_label,
         type: price.type,
         composition: composition,
-        genericName: composition // Use composition as generic identifier
+        genericName: composition, // Use composition as generic identifier
+        isCheaper: currentPrice != null && price.price != null ? price.price < currentPrice : null
       });
 
       seenNames.add(priceName);

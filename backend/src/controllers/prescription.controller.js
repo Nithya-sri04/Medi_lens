@@ -102,61 +102,24 @@ export const analyzePrescription = async (req, res) => {
     console.log('Fallback explanations generated:', explanations);
   }
 
-  // Ensure explanations array matches medicines length
+  // Ensure explanations array matches medicines length — pad or trim, never replace all
   if (explanations.length !== enrichedMedicines.length) {
-    console.error(`Explanations length (${explanations.length}) doesn't match medicines length (${enrichedMedicines.length})`);
-    explanations = enrichedMedicines.map(() => 'Explanation temporarily unavailable');
-  }
-
-  // Simplify DB safety text (pregnancy, liver, warning) via LLM into 3-4 friendly lines per medicine
-  let safetyAdviceSummaries = enrichedMedicines.map(() => '');
-  try {
-    const safetyPayload = enrichedMedicines.map(med => ({
-      pregnancy: med.safetyAdvice?.pregnancy || '',
-      liver: med.safetyAdvice?.liver || '',
-      warning: med.warning || med.sideEffects || ''
-    }));
-    safetyAdviceSummaries = await llmExplanationService.simplifySafetyAdvice(safetyPayload);
-    if (!Array.isArray(safetyAdviceSummaries) || safetyAdviceSummaries.length !== enrichedMedicines.length) {
-      safetyAdviceSummaries = enrichedMedicines.map(() => '');
-    }
-  } catch (e) {
-    console.error('LLM simplifySafetyAdvice failed:', e);
-  }
-
-  // Strip raw warning/sideEffects; add formatted safety advice (LLM or fallback formatter); never send raw DB text
-  const medicinesForResponse = enrichedMedicines.map((med, i) => {
-    const { warning, warningSummary, sideEffects, ...rest } = med;
-    let summary = safetyAdviceSummaries[i];
-    if (summary != null && typeof summary !== 'string') {
-      summary = summary?.text ?? summary?.summary ?? summary?.content ?? null;
-    }
-    if (typeof summary !== 'string' || summary === '[object Object]') summary = null;
-    const hasRawSafety = med.safetyAdvice?.pregnancy || med.safetyAdvice?.liver;
-    const formatRaw = () => hasRawSafety
-      ? llmExplanationService.formatSafetyAdviceFromRaw(med.safetyAdvice?.pregnancy, med.safetyAdvice?.liver, med.name)
-      : '';
-    // Use fallback formatter when: no summary, or summary still has labels, or summary is long/unformatted
-    if (!summary?.trim()) {
-      summary = formatRaw();
-    } else if (typeof summary === 'string') {
-      summary = summary
-        .replace(/,?\s*label:\s*[^\n]*/gi, '')
-        .replace(/\blabel:\s*[^\n]*/gi, '')
-        .replace(/\b(CONSULT YOUR DOCTOR|SAFE IF PRESCRIBED|CAUTION|NOT RECOMMENDED)\b[,.]?\s*/gi, '')
-        .replace(/\s{2,}/g, ' ')
-        .trim();
-      const stillHasLabels = /label:|CONSULT YOUR DOCTOR|CAUTION/i.test(summary);
-      const looksUnformatted = summary.length > 220 && !/^Pregnancy:\s/m && !/^Liver:\s/m;
-      if (stillHasLabels || looksUnformatted) summary = formatRaw();
-      if (summary && med.name) {
-        const nameRe = new RegExp(med.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
-        summary = summary.replace(nameRe, 'This medicine').replace(/\s{2,}/g, ' ').trim();
+    console.warn(`Explanations length (${explanations.length}) doesn't match medicines length (${enrichedMedicines.length}) — padding/trimming`);
+    if (explanations.length < enrichedMedicines.length) {
+      while (explanations.length < enrichedMedicines.length) {
+        explanations.push('Explanation temporarily unavailable');
       }
+    } else {
+      explanations = explanations.slice(0, enrichedMedicines.length);
     }
+  }
+
+  // Safety Advice removed — strip raw warning/sideEffects from response, no LLM safety call
+  const medicinesForResponse = enrichedMedicines.map((med) => {
+    const { warning, warningSummary, sideEffects, ...rest } = med;
     return {
       ...rest,
-      safetyAdviceSummary: summary?.trim() || null
+      safetyAdviceSummary: null
     };
   });
 

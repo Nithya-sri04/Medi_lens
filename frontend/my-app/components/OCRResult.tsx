@@ -122,65 +122,87 @@ export default function OCRResult({ image, onTextExtracted }: Props) {
     });
   };
 
+  const normalizeExtractedText = async (ocrText: string): Promise<string> => {
+    try {
+      const response = await fetch('http://localhost:5000/api/prescription/ocr/normalize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: ocrText })
+      });
+      if (response.ok) {
+        const normalized = await response.json();
+        if (normalized.corrections?.length) {
+          console.log('OCR Corrections applied:', normalized.corrections);
+        }
+        return normalized.normalizedText ?? ocrText;
+      }
+    } catch (e) {
+      console.warn('Normalization failed, using raw OCR text:', e);
+    }
+    return ocrText;
+  };
+
   useEffect(() => {
     if (!image) return;
 
     setLoading(true);
 
-    // Try multiple preprocessing strategies and pick the best result
-    preprocessImage(image).then(async (processedImages) => {
-      const ocrPromises = processedImages.map((processedImg) =>
-        Tesseract.recognize(processedImg, "eng", {
-          logger: (m) => console.log(m)
-        }).then(({ data: { text, confidence } }) => ({ text, confidence: confidence || 0 }))
-      );
+    (async () => {
+      let ocrText = "";
 
+      // Try Veryfi API first (if configured on backend)
       try {
+        const form = new FormData();
+        form.append("image", image, image.name || "image.png");
+        const veryfiRes = await fetch("http://localhost:5000/api/prescription/ocr/veryfi", {
+          method: "POST",
+          body: form,
+        });
+        if (veryfiRes.ok) {
+          const data = await veryfiRes.json();
+          ocrText = (data.text ?? "").trim();
+          if (ocrText) {
+            console.log("✅ Used Veryfi OCR (high accuracy)");
+            ocrText = await normalizeExtractedText(ocrText);
+            setText(ocrText);
+            onTextExtracted(ocrText);
+            setLoading(false);
+            return;
+          }
+        }
+      } catch (_) {
+        // Fall through to Tesseract
+        console.log("⚠️ Veryfi not available, using Tesseract");
+      }
+
+      // Fallback: Use Tesseract with multiple preprocessing strategies
+      try {
+        const processedImages = await preprocessImage(image);
+        const ocrPromises = processedImages.map((processedImg) =>
+          Tesseract.recognize(processedImg, "eng", {
+            logger: (m) => console.log(m)
+          }).then(({ data: { text, confidence } }) => ({ text, confidence: confidence || 0 }))
+        );
         const results = await Promise.all(ocrPromises);
-        
-        // Pick the result with highest confidence
-        const bestResult = results.reduce((best, current) => 
+        const bestResult = results.reduce((best, current) =>
           current.confidence > best.confidence ? current : best
         );
-
-        // If no good confidence, use the longest text (often more complete)
-        let ocrText = bestResult.confidence > 50 
-          ? bestResult.text 
-          : results.reduce((longest, current) => 
+        ocrText = bestResult.confidence > 50
+          ? bestResult.text
+          : results.reduce((longest, current) =>
               current.text.length > longest.text.length ? current : longest
             ).text;
-
-        // Apply enhanced normalization and fuzzy matching via backend
-        try {
-          const response = await fetch('http://localhost:5000/api/prescription/ocr/normalize', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: ocrText })
-          });
-          
-          if (response.ok) {
-            const normalized = await response.json();
-            ocrText = normalized.normalizedText || ocrText;
-            // Log corrections for debugging
-            if (normalized.corrections && normalized.corrections.length > 0) {
-              console.log('OCR Corrections applied:', normalized.corrections);
-            }
-          }
-        } catch (normalizeError) {
-          console.warn('Normalization failed, using raw OCR text:', normalizeError);
-          // Continue with raw OCR text if normalization fails
-        }
-
+        ocrText = await normalizeExtractedText(ocrText);
         setText(ocrText);
         onTextExtracted(ocrText);
       } catch (error) {
-        console.error('OCR Error:', error);
-        setText('');
-        onTextExtracted('');
+        console.error("OCR Error:", error);
+        setText("");
+        onTextExtracted("");
       } finally {
         setLoading(false);
       }
-    });
+    })();
   }, [image]);
 
   if (!image) return null;

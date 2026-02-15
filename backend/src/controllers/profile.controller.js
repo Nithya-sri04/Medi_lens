@@ -5,6 +5,7 @@ import {
   updatePrescriptionByIdAndUser,
   deletePrescriptionByIdAndUser
 } from '../repositories/authRepository.js';
+import { isMongoConnectionError } from '../config/mongodb.js';
 
 /**
  * List saved prescriptions for the authenticated user.
@@ -42,6 +43,12 @@ export const savePrescription = async (req, res) => {
     return res.status(201).json({ prescription });
   } catch (err) {
     console.error('savePrescription error:', err);
+    if (isMongoConnectionError(err)) {
+      return res.status(503).json({
+        error: 'PROFILE_DB_UNAVAILABLE',
+        message: 'Profile save is temporarily unavailable due to database connectivity. Please try again in a few minutes.'
+      });
+    }
     return res.status(500).json({ error: 'SAVE_FAILED' });
   }
 };

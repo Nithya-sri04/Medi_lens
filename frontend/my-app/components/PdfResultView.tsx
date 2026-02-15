@@ -6,6 +6,8 @@
  */
 interface Medicine {
   name: string;
+  /** As written on prescription (e.g. "T.PAN 40 MG"); may differ from DB name */
+  originalName?: string;
   dosage: string;
   frequency: string;
   instructions: {
@@ -19,17 +21,13 @@ interface Medicine {
   };
   purpose: string;
   alternatives: string[];
-  safetyAdviceSummary?: string | null;
-  safetyAdvice?: {
-    alcohol?: string | null;
-    pregnancy?: string | null;
-    breastfeeding?: string | null;
-    driving?: string | null;
-    kidney?: string | null;
-    liver?: string | null;
-  } | null;
+  // Safety advice removed
   verified: boolean;
   verificationMessage?: string;
+  dosageMismatch?: boolean;
+  dosageMismatchMessage?: string | null;
+  equivalentBrand?: boolean;
+  equivalentBrandName?: string;
   composition?: string;
   genericName?: string;
   brandType?: "generic" | "branded" | "unknown";
@@ -63,10 +61,7 @@ const colors = {
   blue200: "#bfdbfe",
   blue700: "#1d4ed8",
   blue800: "#1e40af",
-  sky50: "#f0f9ff",
-  sky200: "#bae6fd",
-  sky700: "#0369a1",
-  sky800: "#075985",
+  // sky colors removed (Safety Advice removed)
   gray50: "#f8fafc",
   gray100: "#f1f5f9",
   gray200: "#e2e8f0",
@@ -202,6 +197,9 @@ export default function PdfResultView({ data }: Props) {
             >
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, flexWrap: "wrap", gap: 8 }}>
                 <h4 style={{ fontWeight: 700, fontSize: 20, color: colors.black, margin: 0 }}>{med.name}</h4>
+              {med.originalName && med.originalName.trim() && med.originalName.trim().toLowerCase() !== med.name.trim().toLowerCase() && (
+                <p style={{ fontSize: 12, color: colors.gray600, marginTop: 4, marginBottom: 0 }}>As written on prescription: <em>{med.originalName}</em></p>
+              )}
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   {med.verified ? (
                     <span style={{ padding: "4px 8px", backgroundColor: colors.green100, color: colors.green800, fontSize: 12, fontWeight: 600, borderRadius: 6 }}>Verified</span>
@@ -223,6 +221,18 @@ export default function PdfResultView({ data }: Props) {
                 </div>
               )}
 
+              {med.dosageMismatch && med.dosageMismatchMessage && (
+                <div style={{ marginBottom: 12, padding: 12, backgroundColor: colors.orange50, border: `1px solid ${colors.orange200}`, borderRadius: 6 }}>
+                  <p style={{ color: colors.orange800, fontSize: 14, fontWeight: 500, margin: 0 }}>{med.dosageMismatchMessage}</p>
+                </div>
+              )}
+
+              {med.equivalentBrand && med.equivalentBrandName && (
+                <div style={{ marginBottom: 12, padding: 12, backgroundColor: colors.gray50, border: `1px solid ${colors.gray200}`, borderRadius: 6 }}>
+                  <p style={{ color: colors.gray700, fontSize: 14, margin: 0 }}>Same composition as <strong>{med.equivalentBrandName}</strong> (different manufacturer). Information shown is for the equivalent product in our database.</p>
+                </div>
+              )}
+
               {med.genericName && med.genericName !== med.name && (
                 <p style={textSm}><strong>Generic Name:</strong> {med.genericName}</p>
               )}
@@ -238,7 +248,7 @@ export default function PdfResultView({ data }: Props) {
 
               {med.foodHabits && med.foodHabits.length > 0 && (
                 <div style={{ marginTop: 12, marginBottom: 8, padding: 8, backgroundColor: colors.blue50, border: `1px solid ${colors.blue200}`, borderRadius: 6 }}>
-                  <p style={{ fontWeight: 600, color: colors.blue800, marginBottom: 4 }}>Food Habits:</p>
+                  <p style={{ fontWeight: 600, color: colors.blue800, marginBottom: 4 }}>General Advice:</p>
                   <ul style={{ marginLeft: 16, listStyle: "disc", fontSize: 14, color: colors.blue700 }}>
                     {med.foodHabits.map((habit, hIdx) => (
                       <li key={hIdx}>{habit}</li>
@@ -261,19 +271,7 @@ export default function PdfResultView({ data }: Props) {
                 </div>
               )}
 
-              {(() => {
-                const summary = typeof med.safetyAdviceSummary === "string" ? med.safetyAdviceSummary.trim() : "";
-                const pregnancy = typeof med.safetyAdvice?.pregnancy === "string" ? med.safetyAdvice.pregnancy : "";
-                const liver = typeof med.safetyAdvice?.liver === "string" ? med.safetyAdvice.liver : "";
-                const hasSafety = summary || pregnancy || liver;
-                if (!hasSafety) return null;
-                return (
-                  <div style={{ marginTop: 8, marginBottom: 8, padding: 12, backgroundColor: colors.sky50, border: `1px solid ${colors.sky200}`, borderRadius: 6 }}>
-                    <p style={{ fontWeight: 600, color: colors.sky800, marginBottom: 4 }}>Safety advice</p>
-                    <p style={{ fontSize: 14, color: colors.sky700, whiteSpace: "pre-line", margin: 0 }}>{summary || [pregnancy, liver].filter(Boolean).join("\n")}</p>
-                  </div>
-                );
-              })()}
+              {/* Safety Advice section removed */}
 
               {med.alternatives && med.alternatives.length > 0 && (
                 <p style={{ ...textSm, marginTop: 8 }}><strong>Alternatives:</strong> {med.alternatives.join(", ")}</p>

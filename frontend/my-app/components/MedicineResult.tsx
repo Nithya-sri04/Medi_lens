@@ -1,5 +1,7 @@
 interface Medicine {
   name: string;
+  /** As written on prescription (e.g. "T.PAN 40 MG"); may differ from DB name (e.g. "Ampant 40mg Tablet") */
+  originalName?: string;
   dosage: string;
   frequency: string;
   instructions: {
@@ -13,18 +15,13 @@ interface Medicine {
   };
   purpose: string;
   alternatives: string[];
-  /** LLM-simplified safety advice (3-4 lines from DB pregnancy/liver/warning) */
-  safetyAdviceSummary?: string | null;
-  safetyAdvice?: {
-    alcohol?: string | null;
-    pregnancy?: string | null;
-    breastfeeding?: string | null;
-    driving?: string | null;
-    kidney?: string | null;
-    liver?: string | null;
-  } | null;
+  // Safety advice removed
   verified: boolean;
   verificationMessage?: string;
+  dosageMismatch?: boolean;
+  dosageMismatchMessage?: string | null;
+  equivalentBrand?: boolean;
+  equivalentBrandName?: string;
   composition?: string;
   genericName?: string;
   brandType?: 'generic' | 'branded' | 'unknown';
@@ -180,7 +177,12 @@ export default function MedicineResult({ data }: Props) {
             <div key={idx} className={`border p-4 rounded ${!med.verified ? 'border-red-300 bg-red-50' : ''}`}>
               {/* Medicine Name and Verification Status */}
               <div className="flex items-center justify-between mb-2">
-                <h4 className="font-bold text-xl text-black">{med.name}</h4>
+                <div>
+                  <h4 className="font-bold text-xl text-black">{med.name}</h4>
+                  {med.originalName && med.originalName.trim().toLowerCase() !== med.name.trim().toLowerCase() && (
+                    <p className="text-sm text-gray-500 mt-0.5">As written on prescription: <span className="italic">{med.originalName}</span></p>
+                  )}
+                </div>
                 <div className="flex gap-2">
                   {med.verified ? (
                     <span className="px-2 py-1 bg-green-100 text-green-800 text-xs font-semibold rounded">
@@ -208,6 +210,20 @@ export default function MedicineResult({ data }: Props) {
               {!med.verified && med.verificationMessage && (
                 <div className="mb-3 p-3 bg-red-100 border border-red-300 rounded">
                   <p className="text-red-800 font-semibold">⚠️ {med.verificationMessage}</p>
+                </div>
+              )}
+
+              {/* Dosage mismatch: DB shows different strength — take as prescribed */}
+              {med.dosageMismatch && med.dosageMismatchMessage && (
+                <div className="mb-3 p-3 bg-amber-50 border border-amber-200 rounded">
+                  <p className="text-amber-800 text-sm font-medium">💊 {med.dosageMismatchMessage}</p>
+                </div>
+              )}
+
+              {/* Same drug, different brand (e.g. Limcee → Limcor) */}
+              {med.equivalentBrand && med.equivalentBrandName && (
+                <div className="mb-3 p-3 bg-slate-50 border border-slate-200 rounded">
+                  <p className="text-slate-700 text-sm">Same composition as <strong>{med.equivalentBrandName}</strong> (different manufacturer). Information shown is for the equivalent product in our database.</p>
                 </div>
               )}
 
@@ -247,10 +263,10 @@ export default function MedicineResult({ data }: Props) {
                 <strong>Instructions:</strong> {formatInstructions(med.instructions)}
               </p>
 
-              {/* Food Habits */}
+              {/* General Advice */}
               {med.foodHabits && Array.isArray(med.foodHabits) && med.foodHabits.length > 0 && (
                 <div className="mt-3 mb-2 p-2 bg-blue-50 border border-blue-200 rounded">
-                  <p className="font-semibold text-blue-800 mb-1">🍽️ Food Habits:</p>
+                  <p className="font-semibold text-blue-800 mb-1">💡 General Advice:</p>
                   <ul className="list-disc list-inside text-sm text-blue-700">
                     {med.foodHabits.map((habit, hIdx) => (
                       <li key={hIdx}>{habit}</li>
@@ -271,28 +287,7 @@ export default function MedicineResult({ data }: Props) {
                 </div>
               )}
 
-              {/* Safety advice: LLM-simplified from DB (pregnancy, liver, warning) — friendly, 3-4 lines */}
-              {(() => {
-                const summary = typeof med.safetyAdviceSummary === 'string' ? med.safetyAdviceSummary.trim() : '';
-                const pregnancy = typeof med.safetyAdvice?.pregnancy === 'string' ? med.safetyAdvice.pregnancy : '';
-                const liver = typeof med.safetyAdvice?.liver === 'string' ? med.safetyAdvice.liver : '';
-                const hasSafety = summary || pregnancy || liver;
-                if (!hasSafety) return null;
-                return (
-                  <div className="mt-2 mb-2 p-3 bg-sky-50 border border-sky-200 rounded">
-                    <p className="font-semibold text-sky-800 mb-1">Safety advice</p>
-                    <p className="text-sky-700 text-sm whitespace-pre-line">
-                      {summary || (
-                        <>
-                          {pregnancy && <span>{pregnancy}</span>}
-                          {pregnancy && liver && '\n'}
-                          {liver && <span>{liver}</span>}
-                        </>
-                      )}
-                    </p>
-                  </div>
-                );
-              })()}
+              {/* Safety Advice section removed */}
 
               {/* Alternatives */}
               {med.alternatives && Array.isArray(med.alternatives) && med.alternatives.length > 0 && (

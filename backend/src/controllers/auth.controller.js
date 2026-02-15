@@ -2,6 +2,7 @@ import jwt from 'jsonwebtoken';
 import { JWT_SECRET } from '../middleware/auth.js';
 import { setOtpEmail, getOtpByEmail, upsertUserByEmail } from '../repositories/authRepository.js';
 import { sendOtpEmail as sendEmailOtp, isEmailConfigured } from '../services/emailService.js';
+import { isMongoConnectionError } from '../config/mongodb.js';
 
 const OTP_EXPIRY_MINUTES = 10;
 
@@ -48,6 +49,12 @@ export const otpRequest = async (req, res) => {
     });
   } catch (err) {
     console.error('otpRequest error:', err);
+    if (isMongoConnectionError(err)) {
+      return res.status(503).json({
+        error: 'AUTH_DB_UNAVAILABLE',
+        message: 'Login/OTP service is temporarily unavailable due to database connectivity. Please try again shortly.'
+      });
+    }
     return res.status(500).json({ error: 'OTP_REQUEST_FAILED' });
   }
 };
@@ -92,6 +99,12 @@ export const otpVerify = async (req, res) => {
     });
   } catch (err) {
     console.error('otpVerify error:', err);
+    if (isMongoConnectionError(err)) {
+      return res.status(503).json({
+        error: 'AUTH_DB_UNAVAILABLE',
+        message: 'Login service is temporarily unavailable due to database connectivity. Please try again shortly.'
+      });
+    }
     return res.status(500).json({ error: 'LOGIN_FAILED' });
   }
 };
