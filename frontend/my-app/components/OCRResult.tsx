@@ -163,7 +163,8 @@ export default function OCRResult({ image, onTextExtracted }: Props) {
           ocrText = (data.text ?? "").trim();
           if (ocrText) {
             console.log("✅ Used Veryfi OCR (high accuracy)");
-            ocrText = await normalizeExtractedText(ocrText);
+            // Skip normalization for Veryfi - the backend parser already cleaned the text
+            // Normalization is only for Tesseract OCR errors
             setText(ocrText);
             onTextExtracted(ocrText);
             setLoading(false);

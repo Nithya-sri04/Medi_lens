@@ -23,6 +23,34 @@ const MEDICINE_OCR_TYPOS = {
   bact: "bact",
   pantop: "pantoprazole",
   pantocid: "pantoprazole",
+  song: "50mg", // OCR error: "song" is misread "50mg"
+  "3oomg": "300mg", // OCR error: "300mg" misread as "3oomg"
+  com: "650mg", // OCR error: "650mg" misread as "Com" (pres-4)
+  "6som": "650mg", // OCR error: "650mg" misread
+  "65om": "650mg", // OCR error: "650mg" misread
+  amphoterion: "amphotericin", // OCR error: "c" misread as "r"
+  amphotenon: "amphotericin", // OCR error: "cic" misread as "non"
+  normayin: "normazin", // OCR error: "z" misread as "y"
+  normazan: "normazin", // OCR error: "i" misread as "a"
+  sompraz: "sompraz", // Keep as is (valid brand name)
+  rf: "af", // OCR error: "A" misread as "R" (After Food)
+  // pres-5 medicines (common handwritten names)
+  omiclon: "omiclon", // Keep as-is (valid medicine name)
+  esomix: "esomix", // Esomix-20 (esomeprazole)
+  orcl: "orcl", // Orcl-50
+  xalcom: "xalcom", // Xalcom (eye drops)
+  rhaboval: "rhaboval", // Rhaboval (statin)
+  // pres-4 OCR errors (printed prescription)
+  acefaminepren: "acetaminophen",
+  acefaminophen: "acetaminophen",
+  acetominophen: "acetaminophen",
+  paracetamol: "acetaminophen", // Same medicine
+  asprin: "aspirin",
+  aspirn: "aspirin",
+  aspirin: "aspirin", // Keep correct
+  clopi: "clopidogrel",
+  clopidory: "clopidogrel",
+  clopidogrel: "clopidogrel", // Keep correct
 };
 
 /**
@@ -43,6 +71,13 @@ function fixDosageDigitLetterConfusion(text) {
   t = t.replace(/(\d)o\s+(?=mg|g|mcg|ml|day|days)/gi, "$10 ");
   t = t.replace(/(\d)o\s+/g, "$10 ");
   t = t.replace(/(\d)o\s*$/gm, "$10");
+  // "G4h" or "G4" → "q4h" (G misread as q)
+  t = t.replace(/\bG(\d+)h?\b/gi, "q$1h");
+  // "q4 TN" or "q4 PN" → "q4h PRN" (misread PRN)
+  t = t.replace(/\bq(\d+)h?\s+(?:TN|PN)\b/gi, "q$1h PRN");
+  // "rin Pon TO" or "rin PO" → "Aspirin PO" (broken Aspirin)
+  t = t.replace(/\brin\s+Pon?\s+(?:TO|to)/gi, "Aspirin PO");
+  t = t.replace(/\brin\s+(?=\d+\s*mg)/gi, "Aspirin ");
   // b2s, b25 etc. before mg: b→6, s→5 → 625
   t = t.replace(/\bb2s\s*(?=mg|g|mcg|ml)/gi, "625 ");
   t = t.replace(/\bb25\s*(?=mg|g|mcg|ml)/gi, "625 ");
@@ -80,6 +115,23 @@ export function applyPrescriptionOCRFixes(text) {
 /** Expose for use in extractor when a single token needs correction (e.g. for search fallback) */
 export function correctMedicineNameOCRTypo(name) {
   if (!name) return name;
+  
+  // Try to correct the entire name first
   const lower = name.toLowerCase().trim();
-  return MEDICINE_OCR_TYPOS[lower] ?? name;
+  if (MEDICINE_OCR_TYPOS[lower]) {
+    return MEDICINE_OCR_TYPOS[lower];
+  }
+  
+  // If not found, apply word-by-word correction (for multi-word names like "liposomal amphoterion b")
+  const words = name.split(/\b/);
+  const result = words.map((w) => {
+    const lowerWord = w.toLowerCase();
+    if (MEDICINE_OCR_TYPOS[lowerWord] !== undefined) {
+      const corrected = MEDICINE_OCR_TYPOS[lowerWord];
+      // Preserve original case pattern
+      return w === lowerWord ? corrected : corrected.charAt(0).toUpperCase() + corrected.slice(1);
+    }
+    return w;
+  });
+  return result.join("");
 }

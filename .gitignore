@@ -156,6 +156,9 @@ dist/
 test-results/
 playwright-report/
 
+# Test images (prescription samples)
+test_images/
+
 # Local development
 .local
 

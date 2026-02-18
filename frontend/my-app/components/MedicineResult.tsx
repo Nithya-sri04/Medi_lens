@@ -38,6 +38,16 @@ interface Medicine {
     genericName?: string;
     composition?: string;
   }>;
+  // Multi-phase dosing
+  hasMultiplePhases?: boolean;
+  dosingPhases?: Array<{
+    timing?: string;
+    dosage?: string;
+    route?: string;
+    frequency?: string;
+    durationText?: string;
+  }>;
+  totalDuration?: number;
 }
 
 interface Interaction {
@@ -65,7 +75,7 @@ interface Props {
     warning?: string;
     rawText?: string;
     extractedText?: string;
-    explanations?: string[];
+    explanations?: Array<string | { name: string; explanation: string }>;
   };
 }
 
@@ -248,20 +258,65 @@ export default function MedicineResult({ data }: Props) {
                 </p>
               )}
 
-              {/* Dosage */}
-              <p className="mb-2 text-black">
-                <strong>Dosage:</strong> {med.dosage || 'Not specified'}
-              </p>
+              {/* Multi-Phase Dosing or Regular Dosing */}
+              {med.hasMultiplePhases && med.dosingPhases ? (
+                <div className="mb-4 p-4 bg-gradient-to-r from-blue-50 to-indigo-50 border-l-4 border-blue-500 rounded">
+                  <p className="font-semibold text-blue-900 mb-3 flex items-center">
+                    📋 Multi-Phase Dosing Schedule
+                  </p>
+                  {med.dosingPhases.map((phase: any, idx: number) => (
+                    <div key={idx} className="mb-3 last:mb-0 p-3 bg-white rounded border border-blue-200">
+                      <p className="font-semibold text-blue-800 mb-2">
+                        {phase.timing || `Phase ${idx + 1}`}
+                      </p>
+                      <div className="grid grid-cols-2 gap-2 text-sm text-gray-700">
+                        {phase.dosage && (
+                          <div>
+                            <span className="font-medium">Dosage:</span> {phase.dosage}
+                          </div>
+                        )}
+                        {phase.route && (
+                          <div>
+                            <span className="font-medium">Route:</span> {phase.route}
+                          </div>
+                        )}
+                        {phase.frequency && (
+                          <div>
+                            <span className="font-medium">Frequency:</span> {phase.frequency}
+                          </div>
+                        )}
+                        {phase.durationText && (
+                          <div>
+                            <span className="font-medium">Duration:</span> {phase.durationText}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  {med.totalDuration && (
+                    <p className="mt-3 text-sm text-blue-700">
+                      <strong>Total Treatment Duration:</strong> {med.totalDuration} days
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <>
+                  {/* Regular Single-Phase Dosing */}
+                  <p className="mb-2 text-black">
+                    <strong>Dosage:</strong> {med.dosage || 'Not specified'}
+                  </p>
 
-              {/* Frequency */}
-              <p className="mb-2 text-black">
-                <strong>Frequency:</strong> {med.frequency || med.instructions?.frequency || 'Not specified'}
-              </p>
+                  {/* Frequency */}
+                  <p className="mb-2 text-black">
+                    <strong>Frequency:</strong> {med.frequency || med.instructions?.frequency || 'Not specified'}
+                  </p>
 
-              {/* Instructions */}
-              <p className="mb-2 text-black">
-                <strong>Instructions:</strong> {formatInstructions(med.instructions)}
-              </p>
+                  {/* Instructions */}
+                  <p className="mb-2 text-black">
+                    <strong>Instructions:</strong> {formatInstructions(med.instructions)}
+                  </p>
+                </>
+              )}
 
               {/* General Advice */}
               {med.foodHabits && Array.isArray(med.foodHabits) && med.foodHabits.length > 0 && (
@@ -315,7 +370,11 @@ export default function MedicineResult({ data }: Props) {
               {data.explanations && data.explanations.length > idx && (
                 <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded">
                   <p className="font-semibold text-blue-800 mb-1">📖 Simple Explanation:</p>
-                  <p className="text-sm text-blue-700">{data.explanations[idx] || 'Explanation not available'}</p>
+                  <p className="text-sm text-blue-700">
+                    {typeof data.explanations[idx] === 'string' 
+                      ? data.explanations[idx] 
+                      : data.explanations[idx]?.explanation || 'Explanation not available'}
+                  </p>
                 </div>
               )}
             </div>

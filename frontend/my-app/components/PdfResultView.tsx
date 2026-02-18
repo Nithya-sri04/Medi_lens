@@ -35,6 +35,20 @@ interface Medicine {
   foodHabits?: string[];
   foodInteractionWarnings?: Array<{ type: string; severity: string; message: string }>;
   marketAlternatives?: Array<{ name: string; type: string; genericName?: string; composition?: string }>;
+  // Multi-phase dosing
+  hasMultiplePhases?: boolean;
+  dosingPhases?: Array<{
+    phaseNumber: number;
+    dosage: string | null;
+    route: string | null;
+    frequency: string | null;
+    duration: string | null;
+    durationDays: number | null;
+    durationText: string | null;
+    dayRange: string | null;
+    timing: string | null;
+  }>;
+  totalDuration?: number;
 }
 
 interface Props {
@@ -50,7 +64,7 @@ interface Props {
     warning?: string;
     rawText?: string;
     extractedText?: string;
-    explanations?: string[];
+    explanations?: Array<string | { name: string; explanation: string }>;
   };
 }
 
@@ -59,8 +73,11 @@ const colors = {
   blue50: "#eff6ff",
   blue100: "#dbeafe",
   blue200: "#bfdbfe",
+  blue500: "#3b82f6",
   blue700: "#1d4ed8",
   blue800: "#1e40af",
+  blue900: "#1e3a8a",
+  indigo50: "#eef2ff",
   // sky colors removed (Safety Advice removed)
   gray50: "#f8fafc",
   gray100: "#f1f5f9",
@@ -242,9 +259,44 @@ export default function PdfResultView({ data }: Props) {
               {med.purpose && (
                 <p style={text}><strong>Purpose:</strong> {med.purpose}</p>
               )}
-              <p style={text}><strong>Dosage:</strong> {med.dosage || "Not specified"}</p>
-              <p style={text}><strong>Frequency:</strong> {med.frequency || med.instructions?.frequency || "Not specified"}</p>
-              <p style={text}><strong>Instructions:</strong> {formatInstructions(med.instructions)}</p>
+              {/* Multi-Phase Dosing or Regular Dosing */}
+              {med.hasMultiplePhases && med.dosingPhases ? (
+                <div style={{ marginBottom: 16, padding: 12, background: `linear-gradient(to right, ${colors.blue50}, ${colors.indigo50})`, borderLeft: `4px solid ${colors.blue500}`, borderRadius: 6 }}>
+                  <p style={{ fontWeight: 600, color: colors.blue900, marginBottom: 12 }}>📋 Multi-Phase Dosing Schedule</p>
+                  {med.dosingPhases.map((phase, idx) => (
+                    <div key={idx} style={{ marginBottom: 12, padding: 12, backgroundColor: 'white', border: `1px solid ${colors.blue200}`, borderRadius: 6 }}>
+                      <p style={{ fontWeight: 600, color: colors.blue800, marginBottom: 8 }}>
+                        {phase.timing || `Phase ${idx + 1}`}
+                      </p>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, fontSize: 14, color: colors.gray700 }}>
+                        {phase.dosage && (
+                          <div><span style={{ fontWeight: 500 }}>Dosage:</span> {phase.dosage}</div>
+                        )}
+                        {phase.route && (
+                          <div><span style={{ fontWeight: 500 }}>Route:</span> {phase.route}</div>
+                        )}
+                        {phase.frequency && (
+                          <div><span style={{ fontWeight: 500 }}>Frequency:</span> {phase.frequency}</div>
+                        )}
+                        {phase.durationText && (
+                          <div><span style={{ fontWeight: 500 }}>Duration:</span> {phase.durationText}</div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  {med.totalDuration && (
+                    <p style={{ marginTop: 12, fontSize: 14, color: colors.blue700 }}>
+                      <strong>Total Treatment Duration:</strong> {med.totalDuration} days
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <>
+                  <p style={text}><strong>Dosage:</strong> {med.dosage || "Not specified"}</p>
+                  <p style={text}><strong>Frequency:</strong> {med.frequency || med.instructions?.frequency || "Not specified"}</p>
+                  <p style={text}><strong>Instructions:</strong> {formatInstructions(med.instructions)}</p>
+                </>
+              )}
 
               {med.foodHabits && med.foodHabits.length > 0 && (
                 <div style={{ marginTop: 12, marginBottom: 8, padding: 8, backgroundColor: colors.blue50, border: `1px solid ${colors.blue200}`, borderRadius: 6 }}>
@@ -291,7 +343,11 @@ export default function PdfResultView({ data }: Props) {
               {data.explanations && data.explanations.length > idx && (
                 <div style={{ marginTop: 12, padding: 12, backgroundColor: colors.blue50, border: `1px solid ${colors.blue200}`, borderRadius: 6 }}>
                   <p style={{ fontWeight: 600, color: colors.blue800, marginBottom: 4 }}>Simple Explanation:</p>
-                  <p style={{ fontSize: 14, color: colors.blue700, margin: 0 }}>{data.explanations[idx] || "Explanation not available"}</p>
+                  <p style={{ fontSize: 14, color: colors.blue700, margin: 0 }}>
+                    {typeof data.explanations[idx] === 'string' 
+                      ? data.explanations[idx] 
+                      : data.explanations[idx]?.explanation || "Explanation not available"}
+                  </p>
                 </div>
               )}
             </div>

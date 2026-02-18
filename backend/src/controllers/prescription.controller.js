@@ -6,6 +6,128 @@ import { calculateConfidenceScore } from "../services/coreAccuracy/confidenceCal
 import { detectDuplicates } from "../services/coreAccuracy/duplicateDetector.js";
 import llmExplanationService from "../services/llmExplanationService.js";
 
+/**
+ * Accept manually entered medicine data (for prescriptions where OCR fails)
+ * POST /api/prescription/manual
+ * Body: { medicines: [...manual medicine objects] }
+ */
+export const analyzeManualPrescription = async (req, res) => {
+  const { medicines } = req.body;
+
+  if (!medicines || !Array.isArray(medicines) || medicines.length === 0) {
+    return res.status(400).json({ error: "MEDICINES_REQUIRED" });
+  }
+
+  try {
+    // Enrich medicines with database data
+    const enrichedMedicines = await Promise.all(medicines.map(async (med) => {
+      const dbData = await findMedicine(med.name);
+      return {
+        ...med,
+        ...dbData,
+        verified: !!dbData
+      };
+    }));
+
+    // Check for drug interactions
+    const interactions = [];
+    const medicineNames = enrichedMedicines.map(m => m.name.toLowerCase());
+    for (let i = 0; i < medicineNames.length; i++) {
+      for (let j = i + 1; j < medicineNames.length; j++) {
+        const interaction = await findInteraction(medicineNames[i], medicineNames[j]);
+        if (interaction) {
+          interactions.push({
+            medicines: [enrichedMedicines[i].name, enrichedMedicines[j].name],
+            severity: interaction.severity,
+            warning: interaction.warning
+          });
+        }
+      }
+    }
+
+    // Prepare LLM data
+    const llmMedicinesData = enrichedMedicines.map(med => {
+      const isContinue = med.instructions?.isContinue === true;
+      const duration = med.instructions?.durationDays
+        ? `${med.instructions.durationDays} days`
+        : (isContinue ? 'Continue as prescribed' : '');
+      return {
+        name: med.name || '',
+        dosage: med.dosage || med.dose || '',
+        frequency: med.frequency || '',
+        timing: med.timing || med.instructions?.timing?.join(', ') || '',
+        food_relation: med.instructions?.foodRelation || '',
+        duration,
+        composition: med.composition || '',
+        generic_name: med.genericName || '',
+        brand_type: med.brandType || '',
+        purpose: med.purpose || '',
+        food_habits: med.foodHabits?.join('; ') || '',
+        verified: med.verified || false
+      };
+    });
+
+    // Detect duplicates
+    const duplicates = detectDuplicates(enrichedMedicines);
+
+    // Calculate confidence (higher for manual entry)
+    const confidence = calculateConfidenceScore(enrichedMedicines, 'manual_entry', '');
+
+    // Generate LLM explanations
+    let explanations = [];
+    try {
+      explanations = await llmExplanationService.explainMedicines(llmMedicinesData);
+    } catch (error) {
+      console.error('LLM explanation failed:', error);
+      explanations = llmMedicinesData.map(med => {
+        let explanation = `Take ${med.name}`;
+        if (med.dosage) explanation += ` ${med.dosage}`;
+        if (med.frequency) explanation += ` ${med.frequency}`;
+        if (med.timing) explanation += ` at ${med.timing}`;
+        explanation += '.';
+        return explanation;
+      });
+    }
+
+    // Ensure explanations match medicines length
+    if (explanations.length < enrichedMedicines.length) {
+      while (explanations.length < enrichedMedicines.length) {
+        explanations.push('Explanation temporarily unavailable');
+      }
+    } else if (explanations.length > enrichedMedicines.length) {
+      explanations = explanations.slice(0, enrichedMedicines.length);
+    }
+
+    // Prepare response
+    const medicinesForResponse = enrichedMedicines.map((med) => {
+      const { warning, warningSummary, sideEffects, ...rest } = med;
+      return {
+        ...rest,
+        safetyAdviceSummary: null
+      };
+    });
+
+    const disclaimer = "This analysis is for informational purposes only and does not constitute medical advice. Always consult with a qualified healthcare professional before starting or changing any medication regimen.";
+
+    return res.json({
+      extractedText: 'Manual Entry',
+      medicines: medicinesForResponse,
+      interactions,
+      duplicates,
+      confidence,
+      explanations,
+      disclaimer,
+      source: 'manual_entry'
+    });
+  } catch (error) {
+    console.error('Manual prescription analysis error:', error);
+    return res.status(500).json({
+      error: "ANALYSIS_FAILED",
+      message: error.message
+    });
+  }
+};
+
 export const analyzePrescription = async (req, res) => {
   const { text, source } = req.body;
 

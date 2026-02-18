@@ -1,6 +1,7 @@
-import { findMedicine, findMedicineByComposition, findInteraction, getMedicineDetails } from "../repositories/medicine.repository.js";
+import { findMedicine, findMedicineByComposition, findMedicinesByComposition, findInteraction, getMedicineDetails } from "../repositories/medicine.repository.js";
 import { extractDosage } from "../utils/dosageParser.js";
 import { parseInstructions } from "../utils/instructionParser.js";
+import { parseMultiPhaseDosage, getTotalDuration } from "../utils/multiPhaseDosageParser.js";
 import { normalizeMedicineName } from "../utils/normalizeMedicineName.js";
 import { correctMedicineNameOCRTypo, applyPrescriptionOCRFixes } from "../utils/prescriptionOCRFixes.js";
 import { verifyMedicine } from "./coreAccuracy/medicineVerificationService.js";
@@ -29,8 +30,9 @@ const prefixToDosageForm = (prefix) => {
 const extractMedicinePatterns = (text) => {
   const prefixPatterns = [];
   
-  // Pattern 1: Prefix + Medicine Name + Dosage (e.g., "T.Amoxycillin 250mg", "C.AMOXICLAV 625 MG", "T.PAN 40 MG")
-  const prefixPattern = /(?:^|\s)(t\.|tab\.?|tablet\.?|c\.|cap\.?|capsule\.?|inj\.?|injection\.?|syp\.?|syrup\.?|ointment\.?|oint\.?)\s*([^\d]+?)(?:\s+(\d+(?:\.\d+)?\s*(?:mg|g|ml|mcg|iu|%))|\s+(?=\d+-\d+-\d+|[lo]-[lo]-[lo]|\d+\s*x\s*|x\s*\d+\s*(?:day|days)\b|b\/f|a\/f|l\/a|at\s|to\s+(?:continue|conhnue|continne)))/gi;
+  // Pattern 1: Prefix + Medicine Name + Dosage (e.g., "T.Amoxycillin 250mg", "C.AMOXICLAV 625 MG", "T.PAN 40 MG", "T.PAN 40 BF")
+  // Medicine name stops before: numbers (dosage), timing patterns, or instructions
+  const prefixPattern = /(?:^|\s)(t\.|tab\.?|tablet\.?|c\.|cap\.?|capsule\.?|inj\.?|injection\.?|syp\.?|syrup\.?|ointment\.?|oint\.?)\s*([^\d]+?)(?:\s+(?=\d+(?:\.\d+)?\s*(?:mg|g|ml|mcg|iu|%)?(?:\s|$)|\d+\s+(?:bf|af|od|bd|tds|qid)|x\s*\d+\s*(?:wks?|weeks?|days?|months?)|\d+-\d+-\d+|[lo]-[lo]-[lo]|b\/f|a\/f|l\/a|iv\s|im\s|od\s|bd\s|tds\s|qid\s|at\s|to\s+(?:continue|conhnue|continne)))/gi;
   
   let match;
   while ((match = prefixPattern.exec(text)) !== null) {
@@ -43,10 +45,12 @@ const extractMedicinePatterns = (text) => {
     // Detect dosage form from prefix AND from words within the captured name
     let dosageForm = prefixToDosageForm(prefix);
     
-    // Strip trailing route/form abbreviations from medicine name
+    // Strip trailing route/form/instruction abbreviations from medicine name
+    // "liposomal amphotericin b x 2 wks" → strip "x 2 wks"
     // "bact ointment la" → strip "la" (local application) and "ointment" (dosage form)
     medicineName = medicineName
-      .replace(/\s+(b\/f|a\/f|l\/a|la|at|iv|p\/r|tablet|capsule|injection|syrup|ointment|cream|drops|gel|lotion|forte)$/i, (m, word) => {
+      .replace(/\s+(x\s*\d+\s*(?:wks?|weeks?|days?|months?))$/i, '') // Remove duration like "x 2 wks"
+      .replace(/\s+(b\/f|a\/f|l\/a|la|at|iv|im|sc|od|bd|tds|qid|p\/r|tablet|capsule|injection|syrup|ointment|cream|drops|gel|lotion|forte)$/i, (m, word) => {
         // If the word is a dosage form, capture it (overrides prefix-based form)
         const formWord = word.toLowerCase();
         if (['ointment', 'cream', 'gel', 'lotion', 'drops', 'tablet', 'capsule', 'injection', 'syrup'].includes(formWord)) {
@@ -120,7 +124,13 @@ const extractMedicinePatterns = (text) => {
     'before', 'after', 'food', 'days', 'day', 'continue', 'forte',
     'with', 'without', 'take', 'apply', 'times', 'daily', 'morning',
     'afternoon', 'night', 'normal', 'diet', 'cream', 'lotion', 'drops',
-    'tabs', 'caps', 'injs', 'stat'
+    'tabs', 'caps', 'injs', 'stat',
+    // Duration and frequency terms
+    'wks', 'weeks', 'week', 'months', 'month', 'years', 'year',
+    // Route of administration
+    'iv', 'oral', 'im', 'sc', 'topical', 'rectal', 'sublingual', 'intravenous',
+    // Frequency abbreviations
+    'od', 'bd', 'tds', 'qid', 'tid', 'hs', 'prn', 'sos', 'stat'
   ]);
   
   while ((match = simpleNamePattern.exec(text)) !== null) {
@@ -177,7 +187,14 @@ const findMedicineWithStrategies = async (pattern) => {
   // This prevents "limcee" from fuzzy-matching "Vitamin C Injection" via Strategy 3
   console.log(`  → Strategy 0: Checking brand-to-composition mapping`);
   const brandToComposition = getBrandToComposition();
-  let brandKey = (pattern.nameWithoutDosage || '').toLowerCase().trim().replace(/\s+/g, ' ');
+  
+  // Apply OCR correction to brand name before lookup
+  const correctedBrandName = correctMedicineNameOCRTypo(pattern.nameWithoutDosage || '');
+  let brandKey = correctedBrandName.toLowerCase().trim().replace(/\s+/g, ' ');
+  if (correctedBrandName !== pattern.nameWithoutDosage) {
+    console.log(`    → OCR correction applied: "${pattern.nameWithoutDosage}" → "${correctedBrandName}"`);
+  }
+  
   // If full key not in map (e.g. "limcee x 2 days"), try first word only ("limcee")
   let composition = brandToComposition[brandKey];
   if (!composition && brandKey.includes(' ')) {
@@ -201,11 +218,34 @@ const findMedicineWithStrategies = async (pattern) => {
       else if (o.startsWith('syp.') || o.startsWith('syrup.')) form = 'Syrup';
     }
     console.log(`🔄 Strategy 0: Brand "${brandKey}" → composition "${composition}" (preferredForm: ${form || 'none'})`);
-    medicine = await findMedicineByComposition(composition, form);
-    if (medicine) {
+    
+    // Extract prescribed dosage from the segment if not already available
+    let dosageForSearch = prescriptionDosage ? parseInt(prescriptionDosage) : null;
+    if (!dosageForSearch && pattern._segment) {
+      const dosageMatch = pattern._segment.match(/(\d+(?:\.\d+)?)\s*(?:mg|g|ml|mcg|iu|%)/i);
+      if (dosageMatch) {
+        dosageForSearch = parseInt(dosageMatch[1]);
+        console.log(`    → Extracted dosage from segment: ${dosageForSearch}mg`);
+      }
+    }
+    
+    // Get primary match and alternatives with same composition
+    const searchName = pattern.nameWithoutDosage || pattern.nameWithDosage;
+    const { primary, alternatives: compAlternatives } = await findMedicinesByComposition(composition, form, dosageForSearch, searchName);
+    
+    if (primary) {
       matchedName = pattern.nameWithDosage || pattern.nameWithoutDosage;
-      console.log(`  ✅ Found equivalent via composition: ${medicine.name || medicine.medicine_name}`);
-      return { medicine, matchedName, equivalentBrand: true, searchedAs: pattern.nameWithoutDosage };
+      console.log(`  ✅ Found equivalent via composition: ${primary.name || primary.medicine_name}`);
+      if (compAlternatives.length > 0) {
+        console.log(`  📋 Found ${compAlternatives.length} alternative brands with same composition`);
+      }
+      return { 
+        medicine: primary, 
+        matchedName, 
+        equivalentBrand: true, 
+        searchedAs: pattern.nameWithoutDosage,
+        alternatives: compAlternatives
+      };
     } else {
       console.log(`  ❌ No match found for composition "${composition}"`);
     }
@@ -222,9 +262,19 @@ const findMedicineWithStrategies = async (pattern) => {
       const searchName = pattern.nameWithoutDosage.toLowerCase();
       const searchFirstWord = searchName.split(' ')[0];
       const medicineFirstWord = medicineName.split(' ')[0];
-      const nameMatches = searchFirstWord.length >= 3 &&
-        (medicineFirstWord.startsWith(searchFirstWord) || searchFirstWord.startsWith(medicineFirstWord) ||
-          medicineName.includes(searchFirstWord) || searchName.includes(medicineFirstWord));
+      
+      // STRICT VALIDATION: Check first 3 characters MUST match to avoid false matches
+      // e.g., "enzoflam" should NOT match "benzoflam" (first 3 chars: "enz" vs "ben")
+      const minLength = Math.min(searchFirstWord.length, medicineFirstWord.length);
+      const charsToCheck = Math.min(3, minLength); // Check first 3 characters
+      const firstCharsMatch = searchFirstWord.substring(0, charsToCheck) === medicineFirstWord.substring(0, charsToCheck);
+      
+      // REQUIRE first 3 chars to match, THEN check other conditions
+      const nameMatches = searchFirstWord.length >= 3 && firstCharsMatch && (
+        medicineFirstWord.startsWith(searchFirstWord) || searchFirstWord.startsWith(medicineFirstWord) ||
+        medicineName.includes(searchFirstWord) || searchName.includes(medicineFirstWord)
+      );
+      
       if (nameMatches) {
         console.log(`    ✅ Strategy 1 matched: "${medicineName}"`);
         matchedName = pattern.nameWithDosage || pattern.nameWithoutDosage;
@@ -244,7 +294,19 @@ const findMedicineWithStrategies = async (pattern) => {
     if (medicine) {
       const medicineName = (medicine.name || medicine.medicine_name || '').toLowerCase();
       const searchName = pattern.nameWithDosage.toLowerCase();
-      if (medicineName.includes(searchName.split(' ')[0]) || searchName.includes(medicineName.split(' ')[0])) {
+      const searchFirstWord = searchName.split(' ')[0];
+      const medicineFirstWord = medicineName.split(' ')[0];
+      
+      // STRICT: First 3 characters must match
+      const minLength = Math.min(searchFirstWord.length, medicineFirstWord.length);
+      const charsToCheck = Math.min(3, minLength);
+      const firstCharsMatch = searchFirstWord.substring(0, charsToCheck) === medicineFirstWord.substring(0, charsToCheck);
+      
+      const nameMatches = firstCharsMatch && (
+        medicineName.includes(searchFirstWord) || searchName.includes(medicineFirstWord)
+      );
+      
+      if (nameMatches) {
         console.log(`    ✅ Strategy 2 matched: "${medicineName}"`);
         matchedName = pattern.nameWithDosage;
         return { medicine, matchedName };
@@ -281,8 +343,16 @@ const findMedicineWithStrategies = async (pattern) => {
       const searchName = pattern.normalized.toLowerCase();
       const searchFirstWord = searchName.split(' ')[0];
       const medicineFirstWord = medicineName.split(' ')[0];
-      if (searchFirstWord.length >= 3 &&
-          (medicineFirstWord.startsWith(searchFirstWord) || searchFirstWord.startsWith(medicineFirstWord))) {
+      
+      // STRICT: First 3 characters must match
+      const minLength = Math.min(searchFirstWord.length, medicineFirstWord.length);
+      const charsToCheck = Math.min(3, minLength);
+      const firstCharsMatch = searchFirstWord.substring(0, charsToCheck) === medicineFirstWord.substring(0, charsToCheck);
+      
+      const nameMatches = searchFirstWord.length >= 3 && firstCharsMatch &&
+          (medicineFirstWord.startsWith(searchFirstWord) || searchFirstWord.startsWith(medicineFirstWord));
+      
+      if (nameMatches) {
         console.log(`    ✅ Strategy 3 matched: "${medicineName}"`);
         matchedName = pattern.nameWithDosage || pattern.normalized;
         return { medicine, matchedName };
@@ -291,6 +361,62 @@ const findMedicineWithStrategies = async (pattern) => {
       }
     } else {
       console.log(`    ❌ Strategy 3: No results`);
+    }
+  }
+
+  // Strategy 3.5: Search by composition/contains field and get alternatives
+  // e.g. "Liposomal Amphotericin B" should match medicines with "Amphotericin B" in composition
+  if (pattern.nameWithoutDosage && pattern.nameWithoutDosage.length >= 3) {
+    console.log(`  → Strategy 3.5: Searching by composition/contains "${pattern.nameWithoutDosage}"`);
+    
+    // Apply OCR corrections to medicine name before searching
+    let correctedName = correctMedicineNameOCRTypo(pattern.nameWithoutDosage);
+    if (correctedName !== pattern.nameWithoutDosage) {
+      console.log(`  → OCR correction applied: "${pattern.nameWithoutDosage}" → "${correctedName}"`);
+    }
+    
+    // Strip parenthetical modifiers (e.g., "(conventional)" from "Amphotericin B")
+    const originalName = correctedName;
+    correctedName = correctedName.replace(/\([^)]+\)\s*/g, '').trim();
+    if (correctedName !== originalName) {
+      console.log(`  → Stripped parenthetical: "${originalName}" → "${correctedName}"`);
+    }
+    
+    // Extract prescribed dosage from the segment (full line for this medicine)
+    // e.g., "inj. liposomal amphoterion b x 2 wks 300mg iv od" → extract "300"
+    let prescribedDosage = prescriptionDosage ? parseInt(prescriptionDosage) : null;
+    if (!prescribedDosage && pattern._segment) {
+      // Try to find dosage in the segment
+      const dosageMatch = pattern._segment.match(/(\d+(?:\.\d+)?)\s*(?:mg|g|ml|mcg|iu|%)/i);
+      if (dosageMatch) {
+        prescribedDosage = parseInt(dosageMatch[1]);
+        console.log(`  → Extracted dosage from segment: ${prescribedDosage}mg from "${pattern._segment}"`);
+      }
+    }
+    
+    const searchName = pattern.nameWithoutDosage || pattern.nameWithDosage;
+    const { primary, alternatives } = await findMedicinesByComposition(
+      correctedName, 
+      preferredForm,
+      prescribedDosage,
+      searchName
+    );
+    
+    if (primary) {
+      console.log(`    ✅ Strategy 3.5 matched by composition: "${primary.name || primary.medicine_name}"`);
+      if (alternatives.length > 0) {
+        console.log(`    📋 Found ${alternatives.length} alternative brands with same composition`);
+      }
+      matchedName = pattern.nameWithDosage || pattern.nameWithoutDosage;
+      return { 
+        medicine: primary, 
+        matchedName, 
+        equivalentBrand: false, 
+        searchedAs: pattern.nameWithoutDosage,
+        alternatives: alternatives // Return alternatives for display
+      };
+    } else {
+      console.log(`    ❌ Strategy 3.5: No results`);
     }
   }
 
@@ -310,7 +436,18 @@ const findMedicineWithStrategies = async (pattern) => {
     medicine = await findMedicine(candidate, rankOptions);
     if (medicine) {
       const medicineName = (medicine.name || medicine.medicine_name || '').toLowerCase();
-      if (medicineName.includes(key) || key.includes(medicineName.split(' ')[0])) {
+      const medicineFirstWord = medicineName.split(' ')[0];
+      
+      // STRICT: First 3 characters must match
+      const minLength = Math.min(key.length, medicineFirstWord.length);
+      const charsToCheck = Math.min(3, minLength);
+      const firstCharsMatch = key.substring(0, charsToCheck) === medicineFirstWord.substring(0, charsToCheck);
+      
+      const nameMatches = firstCharsMatch && (
+        medicineName.includes(key) || key.includes(medicineFirstWord)
+      );
+      
+      if (nameMatches) {
         console.log(`    ✅ Strategy 4 matched: "${medicineName}"`);
         matchedName = pattern.nameWithDosage || medicine.name || medicine.medicine_name;
         return { medicine, matchedName };
@@ -371,22 +508,29 @@ export const extractMedicines = async (normalizedText) => {
       const key = (pattern.nameWithDosage || pattern.nameWithoutDosage || pattern.normalized || '').toLowerCase();
       if (seen.has(key)) continue;
 
-      const { medicine, matchedName, equivalentBrand, searchedAs } = await findMedicineWithStrategies(pattern);
+      // Extract the segment for this medicine (used later for dosage/frequency)
+      const segStart = lineLower.indexOf(pattern.original.toLowerCase());
+      const segEnd = pi + 1 < medicinePatterns.length
+        ? lineLower.indexOf(medicinePatterns[pi + 1].original.toLowerCase())
+        : line.length;
+      const segment = (segStart >= 0 ? line.slice(segStart, segEnd < 0 ? line.length : segEnd) : line).trim();
+      
+      // Attach segment to pattern so strategies can extract dosage
+      pattern._segment = segment;
+
+      const { medicine, matchedName, equivalentBrand, searchedAs, alternatives } = await findMedicineWithStrategies(pattern);
       if (!medicine || !matchedName) continue;
 
       const medicineName = medicine.name || medicine.medicine_name;
       if (seen.has(medicineName.toLowerCase())) continue;
       seen.add(medicineName.toLowerCase());
 
-      // Use the segment of the line for this medicine only (so "t.limcee 1-0-0 x 2 days" gets its own dosage)
-      const segStart = lineLower.indexOf(pattern.original.toLowerCase());
-      const segEnd = pi + 1 < medicinePatterns.length
-        ? lineLower.indexOf(medicinePatterns[pi + 1].original.toLowerCase())
-        : line.length;
-      const segment = (segStart >= 0 ? line.slice(segStart, segEnd < 0 ? line.length : segEnd) : line).trim();
-
-      const { dosage, frequency } = extractDosage(segment);
-      const instructions = parseInstructions(segment);
+      // Use the segment that was already extracted and attached to pattern
+      const { dosage, frequency } = extractDosage(pattern._segment || line);
+      const instructions = parseInstructions(pattern._segment || line);
+      
+      // Parse multi-phase dosing (e.g., "200mg Day 1, then 100mg for 4 days")
+      const multiPhaseResult = parseMultiPhaseDosage(pattern._segment || line);
 
       let extractedDosage = dosage;
       if (pattern.nameWithDosage) {
@@ -435,6 +579,11 @@ export const extractMedicines = async (normalizedText) => {
         equivalentBrandName: (equivalentBrand && searchedAs) ? searchedAs : undefined,
         instructions,
         
+        // Multi-phase dosing (if applicable)
+        dosingPhases: multiPhaseResult.hasMultiplePhases ? multiPhaseResult.phases : undefined,
+        hasMultiplePhases: multiPhaseResult.hasMultiplePhases,
+        totalDuration: multiPhaseResult.hasMultiplePhases ? getTotalDuration(multiPhaseResult.phases) : instructions.durationDays,
+        
         // Basic medicine info (clean trailing slashes/whitespace from DB data)
         purpose: (extended.uses || medicine.uses || medicine.purpose || '')
           .replace(/[\/\s]+$/gm, '').replace(/\n\s*\n/g, '\n').trim() || null,
@@ -477,6 +626,15 @@ export const extractMedicines = async (normalizedText) => {
         
         // Market alternatives
         marketAlternatives: marketAlternatives,
+        
+        // Composition alternatives (same composition, different brands)
+        compositionAlternatives: alternatives ? alternatives.map(alt => ({
+          name: alt.name || alt.medicine_name,
+          dosage: alt._dosageNumber ? `${alt._dosageNumber}mg` : null,
+          price: alt._priceInfo?.price || null,
+          manufacturer: alt.manufacturer || null,
+          composition: alt.composition || null
+        })) : [],
         
         // Review data
         reviews: {

@@ -626,6 +626,275 @@ const COMPOSITION_ALIASES = {
 };
 
 /**
+ * Extract dosage number from medicine name or composition
+ * e.g., "Amphonex 50mg Injection" → 50, "Liposomal Amphotericin B (50mg)" → 50
+ */
+function extractDosageNumber(text) {
+  if (!text) return null;
+  const match = text.match(/(\d+(?:\.\d+)?)\s*(?:mg|ml|gm|g|mcg|iu)/i);
+  return match ? parseFloat(match[1]) : null;
+}
+
+/**
+ * Find ALL medicines with a specific composition and return alternatives
+ * @param {string} composition - Composition to search (e.g., "Liposomal Amphotericin B")
+ * @param {string} preferredForm - Preferred dosage form (e.g., "Injection")
+ * @param {number} prescribedDosage - Prescribed dosage in mg (e.g., 300)
+ * @returns {Promise<{primary: object, alternatives: array}>} Primary match and alternatives
+ */
+export const findMedicinesByComposition = async (composition, preferredForm = null, prescribedDosage = null, searchName = null) => {
+  if (!composition || typeof composition !== 'string') return { primary: null, alternatives: [] };
+  
+  try {
+    console.log(`🔍 findMedicinesByComposition: searching for "${composition}", form="${preferredForm}", dosage=${prescribedDosage}mg, searchName="${searchName || 'none'}"`);
+    
+    // OPTIMIZATION: If searchName is provided, try searching by name first
+    // This ensures brand-specific medicines (e.g., "Chymoral Forte") are included even if they're expensive
+    let prices = [];
+    
+    if (searchName) {
+      const searchWords = searchName.split(/\s+/).filter(w => w.length >= 4);
+      if (searchWords.length > 0) {
+        const brandWord = searchWords[0]; // e.g., "chymoral" from "chymoral forte"
+        console.log(`  → Pre-search by brand name: "${brandWord}"`);
+        // Search by brand name ONLY (no composition filter at DB level)
+        // This ensures we get all products with that brand name
+        const brandPrices = await searchMedicinePrices(brandWord, null);
+        if (brandPrices && brandPrices.length > 0) {
+          console.log(`  → Found ${brandPrices.length} results for brand "${brandWord}"`);
+          prices = brandPrices;
+        }
+      }
+    }
+    
+    // If name search didn't find anything, search by composition only
+    if (prices.length === 0) {
+      prices = await searchMedicinePrices(null, composition.trim());
+    }
+    console.log(`  → Found ${prices?.length || 0} initial results`);
+
+    // Try composition aliases if no results
+    const compLower = composition.toLowerCase().trim();
+    let searchTerm = compLower;
+    if ((!prices || prices.length === 0) && COMPOSITION_ALIASES[compLower]) {
+      for (const alias of COMPOSITION_ALIASES[compLower]) {
+        console.log(`  → Trying alias "${alias}"`);
+        prices = await searchMedicinePrices(null, alias);
+        if (prices && prices.length > 0) {
+          console.log(`  → Found ${prices.length} results for alias "${alias}"`);
+          searchTerm = alias.toLowerCase().trim();
+          break;
+        }
+      }
+    }
+    
+    // If still no results, try searching for individual keywords
+    // e.g., "Liposomal Amphotericin B" → try just "Amphotericin"
+    // BUT: Remember the original composition for better filtering
+    let originalComposition = compLower;
+    if ((!prices || prices.length === 0) && compLower.includes(' ')) {
+      const keywords = compLower.split(/\s+/).filter(w => w.length >= 5);
+      for (const keyword of keywords) {
+        console.log(`  → Trying keyword "${keyword}"`);
+        prices = await searchMedicinePrices(null, keyword);
+        if (prices && prices.length > 0) {
+          console.log(`  → Found ${prices.length} results for keyword "${keyword}"`);
+          searchTerm = keyword;
+          break;
+        }
+      }
+    }
+    
+    if (!prices || prices.length === 0) return { primary: null, alternatives: [] };
+
+    // Filter to match composition
+    // Use original composition for filtering if we fell back to keyword search
+    const compWords = searchTerm.split(/\s+/);
+    const originalWords = originalComposition.split(/\s+/).filter(w => w.length >= 3);
+    
+    const filtered = prices.filter(p => {
+      const comp1 = (p.short_composition1 || '').toLowerCase();
+      const comp2 = (p.short_composition2 || '').toLowerCase();
+      
+      // If we got results from brand search, be more lenient with composition matching
+      // Just check if at least ONE key ingredient is present
+      if (searchName && prices.length > 0 && prices.length <= 20) {
+        // For brand searches with reasonable result counts, check if ANY word matches
+        const anyWordIn1 = compWords.some(w => comp1.includes(w));
+        const anyWordIn2 = compWords.some(w => comp2.includes(w));
+        if (anyWordIn1 || anyWordIn2) return true;
+      }
+      
+      if (comp1 === searchTerm || comp2 === searchTerm) return true;
+      
+      // If we fell back to keyword search (originalWords > 1 but compWords === 1),
+      // prefer matches that contain ALL original words
+      if (originalWords.length > 1 && compWords.length === 1) {
+        const allOriginalIn1 = originalWords.every(w => comp1.includes(w));
+        const allOriginalIn2 = originalWords.every(w => comp2.includes(w));
+        if (allOriginalIn1 || allOriginalIn2) return true;
+        
+        // Fall back to single keyword match if no perfect match
+        const word = compWords[0];
+        const regex = new RegExp(`\\b${word}\\b`, 'i');
+        return regex.test(comp1) || regex.test(comp2);
+      }
+      
+      if (compWords.length > 1) {
+        const allWordsIn1 = compWords.every(w => comp1.includes(w));
+        const allWordsIn2 = compWords.every(w => comp2.includes(w));
+        if (allWordsIn1 || allWordsIn2) return true;
+      }
+      
+      if (compWords.length === 1) {
+        const word = compWords[0];
+        const regex = new RegExp(`\\b${word}\\b`, 'i');
+        if (regex.test(comp1) || regex.test(comp2)) return true;
+      }
+      
+      return false;
+    });
+
+    console.log(`  → After filtering: ${filtered.length} results`);
+    if (filtered.length === 0) return { primary: null, alternatives: [] };
+    
+    // Log sample of filtered results to see what we're working with
+    console.log(`  → Sample filtered results: ${filtered.slice(0, 5).map(p => `"${p.name}" (id: ${p.medicine_id})`).join(', ')}`);
+
+    // Fetch full medicine details for all matches
+    const medicines = [];
+    let skippedCount = 0;
+    
+    for (const priceRow of filtered) {
+      const medicineId = priceRow.medicine_id;
+      if (!medicineId) {
+        skippedCount++;
+        continue;
+      }
+      
+      let medicine = await getMedicineById(medicineId);
+      
+      // If medicine details not found, create a basic medicine object from price data
+      if (!medicine) {
+        console.log(`  ⚠️ Medicine ID ${medicineId} not found in details table, using price data for "${priceRow.name}"`);
+        medicine = {
+          medicine_id: medicineId,
+          name: priceRow.name,
+          medicine_name: priceRow.name,
+          composition: priceRow.short_composition1 || priceRow.short_composition2 || '',
+          manufacturer: priceRow.manufacturer_name || '',
+          type: priceRow.type || '',
+          pack_size_label: priceRow.pack_size_label || '',
+          is_discontinued: priceRow.is_discontinued || false,
+          // Basic info - no detailed fields
+          _isFromPriceData: true
+        };
+      }
+      
+      // Add dosage info for ranking
+      medicine._dosageNumber = extractDosageNumber(medicine.name) || 
+                                extractDosageNumber(priceRow.short_composition1) ||
+                                extractDosageNumber(priceRow.short_composition2);
+      medicine._priceInfo = priceRow;
+      medicines.push(medicine);
+    }
+    
+    console.log(`  → Fetched ${medicines.length} medicine details (skipped ${skippedCount})`);
+    if (medicines.length > 0) {
+      console.log(`  → Medicine forms found: ${medicines.map(m => {
+        const words = m.name.split(' ');
+        return words[words.length - 1];
+      }).join(', ')}`);
+    }
+
+    if (medicines.length === 0) return { primary: null, alternatives: [] };
+
+    // STRICT FORM FILTERING: When form is specified (e.g., "Injection"), only return matching forms
+    const formLower = preferredForm ? preferredForm.toLowerCase() : null;
+    let filteredByForm = medicines;
+    
+    if (formLower) {
+      console.log(`  → Filtering by form: "${preferredForm}"`);
+      console.log(`  → Before filter: ${medicines.length} medicines (${medicines.map(m => m.name.split(' ').pop()).join(', ')})`);
+      
+      // Build list of acceptable form variations
+      // e.g., "Injection" should match "Injection", "Inj", "Injectable"
+      const formVariations = [formLower];
+      if (formLower === 'injection') formVariations.push('inj', 'injectable');
+      if (formLower === 'tablet') formVariations.push('tab', 'tabs');
+      if (formLower === 'capsule') formVariations.push('cap', 'caps');
+      if (formLower === 'syrup') formVariations.push('syp');
+      if (formLower === 'ointment') formVariations.push('oint');
+      
+      const matchingForm = medicines.filter(med => {
+        const nameLower = (med.name || '').toLowerCase();
+        return formVariations.some(variant => nameLower.includes(variant));
+      });
+      
+      if (matchingForm.length > 0) {
+        // Use only matching forms if we found any
+        filteredByForm = matchingForm;
+        console.log(`  ✅ After filter: ${filteredByForm.length} medicines with form "${preferredForm}"`);
+        console.log(`  → Filtered medicines: ${filteredByForm.slice(0, 3).map(m => m.name).join(', ')}`);
+      } else {
+        // No exact form match, log warning but keep all results
+        console.log(`  ⚠️ No medicines found with form "${preferredForm}", showing all ${medicines.length} results`);
+        console.log(`  → Available forms: ${medicines.map(m => m.name.split(' ').slice(-1)[0]).join(', ')}`);
+      }
+    }
+
+    // Sort by: 1) name match, 2) dosage match, 3) price (form already filtered above)
+    filteredByForm.sort((a, b) => {
+      // Priority 1: Name match (exact or partial match with search name)
+      if (searchName) {
+        const searchLower = searchName.toLowerCase().trim();
+        const searchWords = searchLower.split(/\s+/).filter(w => w.length >= 3);
+        
+        const aName = (a.name || '').toLowerCase();
+        const bName = (b.name || '').toLowerCase();
+        
+        // Calculate name match score
+        const aExact = aName.includes(searchLower) ? 1000 : 0;
+        const bExact = bName.includes(searchLower) ? 1000 : 0;
+        
+        const aWordMatches = searchWords.filter(w => aName.includes(w)).length;
+        const bWordMatches = searchWords.filter(w => bName.includes(w)).length;
+        
+        const aScore = aExact + (aWordMatches * 100);
+        const bScore = bExact + (bWordMatches * 100);
+        
+        if (aScore !== bScore) return bScore - aScore; // Higher score first
+      }
+      
+      // Priority 2: Dosage match (closest to prescribed)
+      if (prescribedDosage) {
+        const aDosage = a._dosageNumber || 0;
+        const bDosage = b._dosageNumber || 0;
+        const aDiff = Math.abs(aDosage - prescribedDosage);
+        const bDiff = Math.abs(bDosage - prescribedDosage);
+        if (aDiff !== bDiff) return aDiff - bDiff;
+      }
+
+      // Priority 3: Price (lower is better)
+      const aPrice = a._priceInfo?.price || Infinity;
+      const bPrice = b._priceInfo?.price || Infinity;
+      return aPrice - bPrice;
+    });
+
+    const primary = filteredByForm[0];
+    const alternatives = filteredByForm.slice(1, 6); // Top 5 alternatives
+
+    console.log(`  ✅ Primary: "${primary.name}" (form: ${preferredForm || 'any'}, ${primary._dosageNumber || '?'}mg, ₹${primary._priceInfo?.price || '?'})`);
+    console.log(`  📋 Alternatives: ${alternatives.length}`);
+
+    return { primary, alternatives };
+  } catch (error) {
+    console.error('Error in findMedicinesByComposition:', error);
+    return { primary: null, alternatives: [] };
+  }
+};
+
+/**
  * Find a medicine by composition (e.g. "Vitamin C", "Ascorbic Acid").
  * Prefers a specific dosage form when provided (e.g. "Tablet" when prefix is "t.").
  * Tries composition aliases if primary returns 0 results (e.g. DB may store "Vitamin C" not "Ascorbic Acid").

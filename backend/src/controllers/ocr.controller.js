@@ -1,14 +1,13 @@
 import axios from "axios";
 import FormData from "form-data";
 import { normalizeOCRText, getTextSuggestions } from "../utils/enhancedOCRNormalizer.js";
-import { improveOcrWithPythonLLM } from "../utils/pythonOcrLLmClient.js";
 import { extractPrescriptionWithVeryfi, isVeryfiConfigured } from "../utils/veryfiOcrClient.js";
 
 const DONUT_OCR_URL = process.env.DONUT_OCR_URL || "";
 
 /**
  * Normalize and correct OCR text.
- * Flow: existing JS normalizer (fixes + medicine DB suggestions) → optional Python LLM if PYTHON_OCR_LLM_URL is set.
+ * Flow: existing JS normalizer (fixes + medicine DB suggestions)
  * POST /api/prescription/ocr/normalize (or /api/ocr/normalize depending on mount)
  * Body: { text: string }
  */
@@ -21,20 +20,12 @@ export const normalizeOCR = async (req, res) => {
 
   try {
     const result = await normalizeOCRText(text);
-    let normalizedText = result.normalizedText || text;
-    let pythonLlmUsed = false;
-
-    const pythonCorrected = await improveOcrWithPythonLLM(normalizedText);
-    if (pythonCorrected) {
-      normalizedText = pythonCorrected;
-      pythonLlmUsed = true;
-    }
+    const normalizedText = result.normalizedText || text;
 
     return res.json({
       normalizedText,
       corrections: result.corrections || [],
-      originalText: result.originalText || text,
-      pythonLlmUsed
+      originalText: result.originalText || text
     });
   } catch (error) {
     console.error("OCR Normalization Error:", error);
