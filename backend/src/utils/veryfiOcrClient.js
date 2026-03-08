@@ -5,6 +5,7 @@
 import axios from 'axios';
 import crypto from 'crypto';
 import { parseMedicinesFromText, formatMedicinesAsText } from './prescriptionParser.js';
+import { applyPrescriptionOCRFixes } from './prescriptionOCRFixes.js';
 
 // Load env vars
 import dotenv from 'dotenv';
@@ -172,8 +173,9 @@ export async function extractPrescriptionWithVeryfi(imageBuffer, filename) {
       console.log("   ⚠️ No prescription_list, parsing raw ocr_text");
       console.log("   📄 OCR text preview:", data.ocr_text.substring(0, 200).replace(/\n/g, ' '));
       
-      // Parse medicines from raw text
-      medicines = parseMedicinesFromText(data.ocr_text);
+      // Apply OCR fixes (typos, TA/TA3/TAS → Tab., etc.) before parsing
+      const ocrCorrected = applyPrescriptionOCRFixes(data.ocr_text);
+      medicines = parseMedicinesFromText(ocrCorrected);
       console.log("   📝 Parsed medicines:", medicines.length);
       
       if (medicines.length > 0) {

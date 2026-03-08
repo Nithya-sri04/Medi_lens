@@ -570,7 +570,7 @@ export const extractMedicines = async (normalizedText) => {
         name: medicineName,
         originalName: pattern.original,
         dosage: extractedDosage || dosage,
-        frequency: frequency || instructions.frequency,
+        frequency: instructions.frequency || frequency,
         verified: verification.verified,
         verificationMessage: verification.message,
         dosageMismatch: dosageMismatch || undefined,

@@ -11,16 +11,32 @@
 export function parseMedicinesFromText(ocrText, debug = true) {
   if (!ocrText) return [];
 
-  const lines = ocrText.split('\n').map(l => l.trim()).filter(Boolean);
+  let lines = ocrText.split('\n').map(l => l.trim()).filter(Boolean);
+  
+  // Pre-process: Split lines that have multiple medicines concatenated
+  // E.g., "Inj. REMDEC 200mg OD X 4 days Inj Actemra 400mg OD X 2 with a gap of 2 days"
+  // becomes two separate lines
+  lines = lines.flatMap(line => {
+    // Only split if line is very long and contains multiple medicine prefixes
+    if (line.length > 80) {
+      // Split by patterns like " Inj ", " Tab ", " Cap ", " Syr " (with spaces)
+      // This preserves the prefix with what follows
+      const parts = line.split(/(?=\b(?:Inj|Tab|Cap|Syr|Inj\.?|Tab\.?|Cap\.?|Syr\.?|inj|tab|cap|syr)\s+[A-Z])/);
+      return parts.map(p => p.trim()).filter(p => p.length > 0);
+    }
+    return [line];
+  });
+  
   const medicines = [];
 
   // Medicine detection patterns (at word boundaries or start of line)
-  // 1. Single letter + dot: "T.PAN", "C.AMOX", "S.CETRI", "I.REMDESIVIR"
-  // 2. Full prefix: "Tab.", "Cap.", "Inj.", "Syr."
-  // 3. OCR errors for Inj: "Luj", "Auj", "Adv" (only at start of line)
-  // 4. RX symbol or "B" prefix: "B Acetaminophen", "RX Aspirin"
-  const hasMedicinePrefix = /(?:^|\s)([TCSI]|Tab|Cap|Syr|Inj|Iab|Tap|Gap|tab|cap|syr|inj|mj)\.\s*[A-Z]/i;
-  const hasOcrInjPrefix = /^(Luj|Auj|Adv)\s/i; // OCR errors for Inj at line start (followed by anything)
+  // 1. Single letter MUST have dot: "T.PAN", "C.AMOX" (avoids matching "Consultant", "Secunderabad")
+  // 2. Full prefix: "Tab.", "Cap.", "Inj.", "Syr." (dot optional for handwritten scripts)
+  // 3. TA/TA3/TAS without dot (normalized by OCR fixes to "Tab." but accept "TAB " as fallback)
+  // 4. OCR errors for Inj: "Luj", "Auj", "Adv" (only at start of line)
+  // 5. RX symbol or "B" prefix: "B Acetaminophen", "RX Aspirin"
+  const hasMedicinePrefix = /(?:^|\s)((?:[TCSI]\.)|(?:Tab|Cap|Syr|Inj|Ing|Iab|Tap|Gap|TA3|TAS|TA|tab|cap|syr|inj|ing|mj)\.?)\s*[A-Z]/i;
+  const hasOcrInjPrefix = /^(Luj|Auj|Adv|Ing)\s/i; // OCR errors for Inj at line start (Ing → Inj)
   const hasDotPrefix = /^\.\s*[A-Z][a-z]{2,}/; // Lines starting with ". Word" (min 3 letters)
   const hasMedicineLikeName = /[A-Z][A-Z]{2,}[a-z]+[-\d]/; // Words like "AMOXiclav-500" (mixed case with number)
   const hasRxPrefix = /^(?:B|RX|Rx)\s+[A-Z][a-z]+/i; // "B Acetaminophen" or "RX Aspirin"
@@ -35,15 +51,14 @@ export function parseMedicinesFromText(ocrText, debug = true) {
   for (let i = 0; i < lines.length; i++) {
     let line = lines[i];
     
-    // Preprocess: Strip leading numbers (e.g., "7. T. Medicine" → "T. Medicine")
-    // Also handle cases like "7. MEDICINE NAME" → "T. MEDICINE NAME" (assume Tablet if no prefix after number)
-    const numberedLinePattern = /^(\d+\.?\s+)(.+)$/;
+    // Preprocess: Strip leading numbers (e.g., "7. T. Medicine" or "3.Tab. Andial" → "Tab. Andial")
+    const numberedLinePattern = /^(\d+\.?\s*)(.+)$/;
     const numberedMatch = line.match(numberedLinePattern);
     if (numberedMatch) {
       const afterNumber = numberedMatch[2].trim();
       
       // If the rest doesn't start with a medicine prefix, and has a medicine-like pattern, add "T." prefix
-      const hasPrefixAlready = /^([TCSI]|Tab|Cap|Syr|Inj|Luj|Auj|Adv)\./i.test(afterNumber);
+      const hasPrefixAlready = /^(Tab|Cap|Syr|Inj|Luj|Auj|Adv|[TCSI]|TA3|TAS|TA)\.?\s/i.test(afterNumber);
       
       if (!hasPrefixAlready) {
         // Check if this looks like a medicine name (uppercase letters, possibly with timing/food patterns)
@@ -59,7 +74,7 @@ export function parseMedicinesFromText(ocrText, debug = true) {
       }
     }
     
-    // Skip obvious header/footer/non-medicine lines (LESS AGGRESSIVE)
+    // Skip obvious header/footer/non-medicine lines (hospital headers, patient info, footers)
     const skipPatterns = [
       /মোবাইল/,
       /রোড/,
@@ -68,11 +83,30 @@ export function parseMedicinesFromText(ocrText, debug = true) {
       /বিদ্যালয়/,
       /^[০-৯]+$/, // Bengali numbers only
       /^[\d\-\+\s]+$/, // Numbers/symbols only (but not lines with text)
+      /^R\s*$/, // Recipe symbol only (standalone R)
       /phone|mobile|address|clinic/i,
-      /^(DR\.|DOCTOR|PATIENT|NAME|AGE|DATE|SEX|VISIT|NOTE:)/i, // Header info
+      /^(DR\.|DOCTOR|PATIENT|NAME|AGE|DATE|SEX|VISIT|NOTE:)/i,
+      /^IP\s*No:/i,
+      /\bUHID\s*\d+/i,
+      /^DOA:/i,
+      /Super\s+Speciality\s+Hospital/i,
+      /passion\s+for\s+healing/i,
+      /\d+\s*Yrs?\s*\/\s*Male/i,
+      /\d+\s*Yrs?\s*\/\s*Female/i,
+      /^M[rs]\.\s+.+\d{1,2}\/\d/i, // "Mr. Name 16/5/2021"
+      /Managed\s+by/i,
+      /Tel:\s*\+?\d/i,
+      /www\./i,
+      /Mumbai\s+\d{5}/i,
+      /Vile\s+Parle/i,
+      /Radiant\s+Life\s+Care/i,
+      /^Nanavati\s*$/i, // Hospital name alone on a line
+      /^Date:\s*$/i,
     ];
 
-    const shouldSkip = skipPatterns.some(pattern => pattern.test(line));
+    // Skip lines that are only duration (e.g. "3 days") or single short tokens
+    const isOnlyDuration = /^\d+\s*day(s?)\s*$/i.test(line) || /^day(s?)\s*$/i.test(line);
+    const shouldSkip = skipPatterns.some(pattern => pattern.test(line)) || isOnlyDuration;
     if (shouldSkip || line.length < 2) {
       if (debug) console.log(`   ⊗ Line ${i+1} skipped (header/footer)`);
       continue;
@@ -111,7 +145,22 @@ export function parseMedicinesFromText(ocrText, debug = true) {
     }
   }
 
-  return medicines;
+  // Remove exact duplicates (same name + dose + description)
+  const deduped = [];
+  const seen = new Set();
+  for (const med of medicines) {
+    const key = `${med.name}|${med.dose}|${med.description}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      deduped.push(med);
+    }
+  }
+
+  if (debug && deduped.length < medicines.length) {
+    console.log(`   🔄 Deduplicated: removed ${medicines.length - deduped.length} duplicate(s)`);
+  }
+
+  return deduped;
 }
 
 /**
@@ -128,11 +177,12 @@ function parseMedicineLineMultiple(line, allLines = [], currentIndex = 0) {
   const medicines = [];
   
   // Two patterns:
-  // 1. Standard prefix with dot: "T.PAN", "Tab. Esonix", "Inj. REMDESIVIR", "C.AMOXICLAV"
-  const standardPattern = /(?:^|\s)([TCSI]|Tab|Cap|Syr|Inj|Iab|Tap|Gap|tab|cap|syr|inj|mj)\.?\s*([A-Z][A-Z0-9\s\-\(\)]+?)(?=\s+\d|\s+[A-Z]{2,}\/|\s*$|\s+x|\s+X)/gi;
+  // 1. Single letter MUST have dot (T. C. S. I.); Tab/Cap/etc allow optional dot. Avoids "Consultant", "Secunderabad".
+  // Lookahead allows end of line (with optional trailing . or space), space+digit, or trailing dosage
+  const standardPattern = /(?:^|\s)((?:[TCSI]\.)|(?:Tab|Cap|Syr|Inj|Ing|Iab|Tap|Gap|TA3|TAS|TA|tab|cap|syr|inj|ing|mj)\.?)\s*([A-Z][A-Z0-9\s\-\(\)]+?)(?=\s+-?\d|\s+[A-Z]{2,}\/|\s*\.?\s*$|\s+x|\s+X)/gi;
   
-  // 2. OCR error pattern for Inj (only at line start): "Luj Liposomal", "Auj (conventional) Amphotericin", "Adv"
-  const ocrInjPattern = /^(Luj|Auj|Adv)\s+(.+?)$/i; // Match everything after the prefix
+  // 2. OCR error pattern for Inj: "Luj Liposomal", "Auj (conventional) Amphotericin", "Adv", "Ing. Liposomal"
+  const ocrInjPattern = /^(Luj|Auj|Adv|Ing)\.?\s+(.+?)$/i;
   
   const seenNames = new Set(); // Avoid duplicates
   
@@ -170,24 +220,27 @@ function parseMedicineLineMultiple(line, allLines = [], currentIndex = 0) {
   }
   
   // Try common medicine names: "Aspirin", "Clopidogrel", etc.
-  const commonPattern = /\b(Acetaminophen|Paracetamol|Aspirin|Ibuprofen|Amoxicillin|Clopidogrel|Metformin|Atorvastatin|Lisinopril|Omeprazole|Esomeprazole)(?:\s+(\d+\s*(?:mg|ml|gm|g)))?\b/gi;
-  let commonMatch;
-  while ((commonMatch = commonPattern.exec(line)) !== null) {
-    const medicineName = commonMatch[1];
-    const dose = commonMatch[2] || '';
-    const fullName = medicineName;
-    
-    if (seenNames.has(fullName)) continue;
-    seenNames.add(fullName);
-    
-    // Get rest of line after medicine name for description
-    const afterName = line.substring(commonMatch.index + commonMatch[0].length).trim();
-    
-    medicines.push({
-      name: fullName,
-      dose: dose,
-      description: afterName,
-    });
+  // Only perform this when the line does not already start with a prescription prefix
+  if (!/^(?:[TCIS]\.|Tab\.|Cap\.|Syr\.|Inj\.|Ing\.)/i.test(line)) {
+    const commonPattern = /\b(Acetaminophen|Paracetamol|Aspirin|Ibuprofen|Amoxicillin|Clopidogrel|Metformin|Atorvastatin|Lisinopril|Omeprazole|Esomeprazole)(?:\s+(\d+\s*(?:mg|ml|gm|g)))?\b/gi;
+    let commonMatch;
+    while ((commonMatch = commonPattern.exec(line)) !== null) {
+      const medicineName = commonMatch[1];
+      const dose = commonMatch[2] || '';
+      const fullName = medicineName;
+      
+      if (seenNames.has(fullName)) continue;
+      seenNames.add(fullName);
+      
+      // Get rest of line after medicine name for description
+      const afterName = line.substring(commonMatch.index + commonMatch[0].length).trim();
+      
+      medicines.push({
+        name: fullName,
+        dose: dose,
+        description: afterName,
+      });
+    }
   }
   
   // Try OCR Inj pattern (for lines starting with Luj, Auj, Adv)
@@ -219,6 +272,9 @@ function parseMedicineLineMultiple(line, allLines = [], currentIndex = 0) {
           /^song\s*$/i,                       // OCR error: "song" is misread "50mg" - capture it
           /^iv\s*od/i,                        // "IV OD" route + frequency
           /^x\s*\d+\s*(?:wks?|weeks?|days?)/i, // "x 2 wks", "x 5 days"
+          /\(\s*\d+\s*(?:mg|ml|g)\s*\)/i,     // "(300mg)" total daily dose
+          /\d+\s*vials?\s*\/?\s*day/i,        // "6 vials/day"
+          /\d+\s*\/\s*day/i,                  // "3/day" frequency
         ];
         
         for (const nextLine of nextLines) {
@@ -228,8 +284,7 @@ function parseMedicineLineMultiple(line, allLines = [], currentIndex = 0) {
           if (!trimmed || trimmed.length === 0) continue;
           
           // Stop if we hit another medicine or header
-          // Include "T.", "C.", "S.", "I." patterns
-          if (/(?:^|\s)[TCSI]\.|(?:Tab|Cap|Syr|Inj|Luj|Auj|Adv|Dr\.|Patient|Name|Hospital)\./i.test(trimmed)) {
+          if (/(?:^|\s)[TCSI]\.|(?:Tab|Cap|Syr|Inj|Ing|Luj|Auj|Adv|Dr\.|Patient|Name|Hospital)\./i.test(trimmed)) {
             break;
           }
           
@@ -259,7 +314,7 @@ function parseMedicineLineMultiple(line, allLines = [], currentIndex = 0) {
   // Try standard pattern for medicines with prefixes
   let match;
   while ((match = standardPattern.exec(line)) !== null) {
-    const prefix = match[1];
+    const prefix = match[1].replace(/\.$/, '').trim(); // e.g. "T." -> "T"
     let medicineName = match[2].trim();
     
     // Stop at dose patterns or end markers
@@ -271,29 +326,38 @@ function parseMedicineLineMultiple(line, allLines = [], currentIndex = 0) {
     // But keep numbers that are part of the medicine name (e.g., "FORTE" shouldn't remove "1")
     medicineName = medicineName.replace(/\s+\d+\s*$/i, '').trim();
     
-    // Skip if too short or looks like junk
-    // Skip instruction phrases like "O CONTINUE", "TO CONTINUE"
-    const isOnlyJunk = /^(TO|O\s+CONTINUE|L\/A|B\/F|OF|OR|AND|THE|FOR|CONTINUE)$/i.test(medicineName);
+    // Strip leading lowercase token + spaces/dot (OCR noise e.g. "ab  . Azenac-MR" -> "Azenac-MR")
+    medicineName = medicineName.replace(/^[a-z]+\s*\.?\s*/, '').trim();
+
+    // Skip if too short, only lowercase letters, no uppercase (e.g. "ab" from OCR), or junk
+    const isOnlyJunk = /^(TO|O\s+CONTINUE|L\/A|B\/F|OF|OR|AND|THE|FOR|CONTINUE|MG|ML|GM|G|\d+\s*DAYS?|\d+|X|x|BD|OD|TDS?|QID)$/i.test(medicineName);
+    const isMGAlone = /^mg$/i.test(medicineName); // Filter "Tab. mg" phantom extractions
     const isTooShort = medicineName.length < 3;
-    
-    if (isTooShort || isOnlyJunk) {
+    const isOnlyLowercase = /^[a-z]+$/.test(medicineName);
+    const hasNoUppercase = !/[A-Z]/.test(medicineName);
+    const isOcrJunkFragment = /^ab\s*\.?\s*$/i.test(medicineName) || (medicineName.length <= 4 && /^ab/i.test(medicineName));
+    const isNumericOrTiming = /^[\d\s\-]+$/.test(medicineName);
+
+    if (isTooShort || isOnlyJunk || isMGAlone || isOnlyLowercase || hasNoUppercase || isOcrJunkFragment || isNumericOrTiming) {
       continue;
     }
     
     // Remove trailing " AT" if present (e.g., "AMLOKIND AT" → "AMLOKIND")
     medicineName = medicineName.replace(/\s+AT$/i, '').trim();
+    // Remove trailing OCR junk (e.g. " e Depa" from "Dehydration" on same line)
+    medicineName = medicineName.replace(/\s+[a-z]\s+[A-Za-z]+$/i, '').trim();
     
-    // Normalize prefix (including OCR errors like "mj" -> "Inj", "Luj" -> "Inj", "Auj" -> "Inj")
+    // Normalize prefix (including OCR errors like "mj" -> "Inj", "Luj" -> "Inj"; TA/TA3/TAS -> "Tab")
     let normalizedPrefix = 'Tab';
     const upperPrefix = prefix.toUpperCase();
-    if (upperPrefix === 'T' || /TAB|IAB|LAB|TAP/i.test(upperPrefix)) {
+    if (upperPrefix === 'T' || /TAB|IAB|LAB|TAP|^TA3?$|^TAS$/i.test(upperPrefix)) {
       normalizedPrefix = 'Tab';
     } else if (upperPrefix === 'C' || /CAP|GAP/i.test(upperPrefix)) {
       normalizedPrefix = 'Cap';
     } else if (upperPrefix === 'S' || /SYR|GYR/i.test(upperPrefix)) {
       normalizedPrefix = 'Syr';
-    } else if (upperPrefix === 'I' || /INJ|MJ|LUJ|AUJ|ADV/i.test(upperPrefix)) {
-      normalizedPrefix = 'Inj'; // Handle "mj", "Luj", "Auj", "Adv" OCR errors
+    } else if (upperPrefix === 'I' || /INJ|ING|MJ|LUJ|AUJ|ADV/i.test(upperPrefix)) {
+      normalizedPrefix = 'Inj'; // Handle "Ing", "mj", "Luj", "Auj", "Adv" OCR errors
     } else if (/^[BOE]$/i.test(upperPrefix)) {
       normalizedPrefix = 'Tab'; // OCR errors
     }
@@ -395,6 +459,9 @@ function parseMedicineLineMultiple(line, allLines = [], currentIndex = 0) {
           /^\(\s*(?:month|week|day)/i,        // "(month)" or "(month." on separate line
           /\b(?:iv|im|sc|oral)\b/i,           // Route of administration
           /\b(?:od|bd|tds|qid|bf|af)\b/i,     // Frequency and food relation
+          /\(\s*\d+\s*(?:mg|ml|g)\s*\)/i,     // "(300mg)" total daily dose
+          /\d+\s*vials?\s*\/?\s*day/i,        // "6 vials/day"
+          /\d+\s*\/\s*day/i,                  // "3/day" frequency
         ];
       
       for (const nextLine of nextLines) {
@@ -404,8 +471,7 @@ function parseMedicineLineMultiple(line, allLines = [], currentIndex = 0) {
         if (!trimmed || trimmed.length === 0) continue;
         
         // Stop if we hit another medicine or header
-        // Also stop at "T.", "C.", "S.", "I." patterns
-        if (/(?:^|\s)[TCSI]\.|(?:Tab|Cap|Syr|Inj|Luj|Auj|Adv|Dr\.|Patient|Name|Hospital)\./i.test(trimmed)) {
+        if (/(?:^|\s)[TCSI]\.|(?:Tab|Cap|Syr|Inj|Ing|Luj|Auj|Adv|Dr\.|Patient|Name|Hospital)\./i.test(trimmed)) {
           break;
         }
         
@@ -435,16 +501,16 @@ function parseMedicineLineMultiple(line, allLines = [], currentIndex = 0) {
   
   // Fallback: If no matches, try simple pattern at start (including OCR errors)
   if (medicines.length === 0) {
-    const simplePattern = /^([TCSI]|mj|MJ|Luj|Auj|Adv|luj|auj|adv)\.?\s*([A-Z][A-Z]+)/i;
+    const simplePattern = /^([TCSI]|Tab|TA3|TAS|TA|mj|MJ|Luj|Auj|Adv|luj|auj|adv)\.?\s*([A-Z][A-Z]+)/i;
     const simpleMatch = line.match(simplePattern);
     if (simpleMatch) {
       const prefix = simpleMatch[1];
       const name = simpleMatch[2];
       
-      // Normalize prefix
+      // Normalize prefix (include TA, TA3, TAS for handwritten prescriptions)
       let normalizedPrefix = 'Tab';
       const upperPrefix = prefix.toUpperCase();
-      if (upperPrefix === 'T') {
+      if (upperPrefix === 'T' || /^TAB|^TA3?$|^TAS$/i.test(upperPrefix)) {
         normalizedPrefix = 'Tab';
       } else if (upperPrefix === 'C') {
         normalizedPrefix = 'Cap';
@@ -531,6 +597,9 @@ function parseMedicineLineMultiple(line, allLines = [], currentIndex = 0) {
           /^\(\s*(?:month|week|day)/i,
           /\b(?:iv|im|sc|oral)\b/i,
           /\b(?:od|bd|tds|qid|bf|af)\b/i,
+          /\(\s*\d+\s*(?:mg|ml|g)\s*\)/i,
+          /\d+\s*vials?\s*\/?\s*day/i,
+          /\d+\s*\/\s*day/i,
         ];
         
         for (const nextLine of nextLines) {
@@ -540,8 +609,7 @@ function parseMedicineLineMultiple(line, allLines = [], currentIndex = 0) {
           if (!trimmed || trimmed.length === 0) continue;
           
           // Stop if we hit another medicine or header
-          // Include "T.", "C.", "S.", "I." patterns
-          if (/(?:^|\s)[TCSI]\.|(?:Tab|Cap|Syr|Inj|Luj|Auj|Adv|Dr\.|Patient|Name|Hospital)\./i.test(trimmed)) {
+          if (/(?:^|\s)[TCSI]\.|(?:Tab|Cap|Syr|Inj|Ing|Luj|Auj|Adv|Dr\.|Patient|Name|Hospital)\./i.test(trimmed)) {
             break;
           }
           

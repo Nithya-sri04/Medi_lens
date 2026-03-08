@@ -79,6 +79,22 @@ interface Props {
   };
 }
 
+/** Build a simple fallback explanation when the API does not provide one */
+function getSimpleExplanationFallback(med: Medicine): string {
+  const name = med.name || 'this medicine';
+  const parts: string[] = [];
+  parts.push(`Take ${name}`);
+  if (med.dosage) parts.push(med.dosage);
+  const freq = med.frequency || med.instructions?.frequencyText || med.instructions?.frequency;
+  if (freq) parts.push(freq);
+  const dur = med.instructions?.durationDays;
+  if (dur != null) parts.push(`for ${dur} days`);
+  let sentence = parts.join(' ');
+  if (!sentence.endsWith('.')) sentence += '.';
+  if (med.purpose) sentence += ` Used for ${med.purpose}.`;
+  return sentence;
+}
+
 export default function MedicineResult({ data }: Props) {
   if (!data) return null;
 
@@ -366,17 +382,20 @@ export default function MedicineResult({ data }: Props) {
                 </div>
               )}
 
-              {/* LLM Explanation */}
-              {data.explanations && data.explanations.length > idx && (
-                <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded">
-                  <p className="font-semibold text-blue-800 mb-1">📖 Simple Explanation:</p>
-                  <p className="text-sm text-blue-700">
-                    {typeof data.explanations[idx] === 'string' 
-                      ? data.explanations[idx] 
-                      : data.explanations[idx]?.explanation || 'Explanation not available'}
-                  </p>
-                </div>
-              )}
+              {/* LLM Explanation — always show; use API text or fallback from medicine data */}
+              <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded">
+                <p className="font-semibold text-blue-800 mb-1">📖 Simple Explanation:</p>
+                <p className="text-sm text-blue-700">
+                  {(() => {
+                    const raw = data.explanations?.[idx];
+                    const text = typeof raw === 'string' ? raw : raw?.explanation;
+                    if (text && text.trim() && text !== 'Explanation not available' && text !== 'Explanation temporarily unavailable') {
+                      return text;
+                    }
+                    return getSimpleExplanationFallback(med);
+                  })()}
+                </p>
+              </div>
             </div>
           ))}
         </div>

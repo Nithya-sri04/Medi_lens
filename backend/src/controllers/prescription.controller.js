@@ -224,16 +224,17 @@ export const analyzePrescription = async (req, res) => {
     console.log('Fallback explanations generated:', explanations);
   }
 
-  // Ensure explanations array matches medicines length — pad or trim, never replace all
-  if (explanations.length !== enrichedMedicines.length) {
-    console.warn(`Explanations length (${explanations.length}) doesn't match medicines length (${enrichedMedicines.length}) — padding/trimming`);
-    if (explanations.length < enrichedMedicines.length) {
-      while (explanations.length < enrichedMedicines.length) {
-        explanations.push('Explanation temporarily unavailable');
-      }
-    } else {
-      explanations = explanations.slice(0, enrichedMedicines.length);
+  // Normalize to string[] (ensure each item is a string)
+  explanations = explanations.map((exp) => (typeof exp === 'string' ? exp : (exp?.explanation || exp?.text || '')) || '');
+  if (explanations.length < enrichedMedicines.length) {
+    console.warn(`Explanations length (${explanations.length}) doesn't match medicines length (${enrichedMedicines.length}) — padding`);
+    while (explanations.length < enrichedMedicines.length) {
+      const med = enrichedMedicines[explanations.length];
+      const fallback = `Take ${med?.name || 'this medicine'}${med?.dosage ? ` ${med.dosage}` : ''}${med?.instructions?.durationDays ? ` for ${med.instructions.durationDays} days` : ''}.${med?.purpose ? ` Used for ${med.purpose}.` : ''}`;
+      explanations.push(fallback);
     }
+  } else if (explanations.length > enrichedMedicines.length) {
+    explanations = explanations.slice(0, enrichedMedicines.length);
   }
 
   // Safety Advice removed — strip raw warning/sideEffects from response, no LLM safety call

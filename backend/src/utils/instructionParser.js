@@ -83,6 +83,24 @@ export const parseInstructions = (text) => {
     instructions.frequencyText = `q${hours}h`;
   }
 
+  // X vials/day or X vials (e.g. "6 vials/day" or "6 vials." = 6 times per day for injections)
+  const vialsPerDayMatch = text.match(/(\d+)\s*vials?\s*(?:\/?\s*(?:day|per\s*day))?/i);
+  if (vialsPerDayMatch) {
+    const n = vialsPerDayMatch[1];
+    instructions.frequency = n === '1' ? 'Once daily' : `${n} times per day (${n} vials/day)`;
+    instructions.frequencyText = `${n} vials/day`;
+  }
+
+  // X/day frequency (e.g. "3/day") — only if we didn't already set frequency from vials
+  if (!instructions.frequency) {
+    const perDayMatch = text.match(/(\d+)\s*\/\s*day/i);
+    if (perDayMatch) {
+      const n = perDayMatch[1];
+      instructions.frequency = n === '1' ? 'Once daily' : `${n} times per day`;
+      instructions.frequencyText = `${n}/day`;
+    }
+  }
+
   // BF / AF (Before Food / After Food)
   if (/\b(bf|before\s+food)\b/i.test(text)) {
     instructions.foodRelation = "Before Food";

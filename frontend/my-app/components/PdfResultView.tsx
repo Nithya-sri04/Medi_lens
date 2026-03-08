@@ -68,6 +68,21 @@ interface Props {
   };
 }
 
+function getSimpleExplanationFallback(med: Medicine): string {
+  const name = med.name || "this medicine";
+  const parts: string[] = [];
+  parts.push(`Take ${name}`);
+  if (med.dosage) parts.push(med.dosage);
+  const freq = med.frequency || med.instructions?.frequencyText || med.instructions?.frequency;
+  if (freq) parts.push(freq);
+  const dur = med.instructions?.durationDays;
+  if (dur != null) parts.push(`for ${dur} days`);
+  let sentence = parts.join(" ");
+  if (!sentence.endsWith(".")) sentence += ".";
+  if (med.purpose) sentence += ` Used for ${med.purpose}.`;
+  return sentence;
+}
+
 // Hex/rgb-only palette (no lab/oklch)
 const colors = {
   blue50: "#eff6ff",
@@ -340,16 +355,19 @@ export default function PdfResultView({ data }: Props) {
                 </div>
               )}
 
-              {data.explanations && data.explanations.length > idx && (
-                <div style={{ marginTop: 12, padding: 12, backgroundColor: colors.blue50, border: `1px solid ${colors.blue200}`, borderRadius: 6 }}>
-                  <p style={{ fontWeight: 600, color: colors.blue800, marginBottom: 4 }}>Simple Explanation:</p>
-                  <p style={{ fontSize: 14, color: colors.blue700, margin: 0 }}>
-                    {typeof data.explanations[idx] === 'string' 
-                      ? data.explanations[idx] 
-                      : data.explanations[idx]?.explanation || "Explanation not available"}
-                  </p>
-                </div>
-              )}
+              <div style={{ marginTop: 12, padding: 12, backgroundColor: colors.blue50, border: `1px solid ${colors.blue200}`, borderRadius: 6 }}>
+                <p style={{ fontWeight: 600, color: colors.blue800, marginBottom: 4 }}>Simple Explanation:</p>
+                <p style={{ fontSize: 14, color: colors.blue700, margin: 0 }}>
+                  {(() => {
+                    const raw = data.explanations?.[idx];
+                    const text = typeof raw === "string" ? raw : raw?.explanation;
+                    if (text && text.trim() && text !== "Explanation not available" && text !== "Explanation temporarily unavailable") {
+                      return text;
+                    }
+                    return getSimpleExplanationFallback(med);
+                  })()}
+                </p>
+              </div>
             </div>
           ))}
         </div>

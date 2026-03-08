@@ -51,6 +51,16 @@ const MEDICINE_OCR_TYPOS = {
   clopi: "clopidogrel",
   clopidory: "clopidogrel",
   clopidogrel: "clopidogrel", // Keep correct
+  remdec: "remdec", // Keep as is (valid medicine name)
+  remdesivir: "remdesivir", // Keep correct
+  actemra: "actemra", // Keep as is (valid medicine name)
+  // Handwritten / Indian prescription OCR (TA→Tab, medicine name typos)
+  azenal: "azenac",
+  azenac: "azenac",
+  zofel: "zofer",
+  zofer: "zofer",
+  oflazest: "oflazest",
+  andial: "andial",
 };
 
 /**
@@ -102,11 +112,59 @@ function fixMedicineNameTypos(text) {
 }
 
 /**
+ * Normalize tablet prefix variants (TA, TA3, TAS → Tab.) so parser recognizes medicine lines.
+ * Only replace when followed by an uppercase letter (medicine name). Order: TA3, TAS before TA.
+ */
+function fixTabletPrefixVariants(text) {
+  return text.replace(/\b(TA3|TAS|TAD|TA)\s+(?=[A-Z])/g, "Tab. ");
+}
+
+/**
+ * Fix medicine-name phrases where OCR misreads characters (e.g. OFLAZEST 02 → OFLAZEST OZ).
+ */
+function fixMedicinePhraseTypos(text) {
+  let t = text;
+  t = t.replace(/\bOFLAZEST\s+02\b/gi, "OFLAZEST OZ");
+  t = t.replace(/\bAZENAL\s*-\s*MR\b/gi, "AZENAC-MR");
+  return t;
+}
+
+/**
+ * Fix "Ing." → "Inj." (Injection) — common OCR misread on hospital prescriptions.
+ * Also fix "Adv: gy REMDEC" → "Inj. REMDEC" (Advice: marker with OCR errors)
+ */
+function fixInjPrefix(text) {
+  let t = text;
+  // Fix "Adv: gy REMDEC" → "Inj. REMDEC" (Advice: OCR error, gy is noise)
+  t = t.replace(/\bAdv:\s*gy\s+([A-Z][A-Za-z0-9\s]+)/gi, "Inj. $1");
+  // Fix "Adv:" without the gy variant (cleanup "Advice:" prefix)
+  t = t.replace(/\bAdv:\s+(?!gy)/gi, "Inj. ");
+  // Standard Ing. → Inj.
+  t = t.replace(/\bIng\./g, "Inj.");
+  return t;
+}
+
+/**
+ * Fix dosage line OCR: "Sony" / "song" before vials → "50mg"; (300g) → (300mg).
+ */
+function fixVialDosageTypos(text) {
+  let t = text;
+  t = t.replace(/\b(Sony|song)\s*[^\d]*(\d+)\s*vials?/gi, "50mg $2 vials");
+  t = t.replace(/\b(Sony|song)\s*$/gim, "50mg");
+  t = t.replace(/\(\s*(\d+)\s*[gG]\s*\)/g, "($1mg)"); // (300g) → (300mg) in parens
+  return t;
+}
+
+/**
  * Run all prescription OCR fixes on raw text. Call this before normalizeText().
  */
 export function applyPrescriptionOCRFixes(text) {
   if (!text || typeof text !== "string") return text;
   let t = text;
+  t = fixInjPrefix(t);
+  t = fixTabletPrefixVariants(t);
+  t = fixMedicinePhraseTypos(t);
+  t = fixVialDosageTypos(t);
   t = fixDosageDigitLetterConfusion(t);
   t = fixMedicineNameTypos(t);
   return t;

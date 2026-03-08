@@ -758,6 +758,8 @@ export const findMedicinesByComposition = async (composition, preferredForm = nu
     console.log(`  → After filtering: ${filtered.length} results`);
     if (filtered.length === 0) return { primary: null, alternatives: [] };
     
+    const formLower = preferredForm ? preferredForm.toLowerCase() : null;
+    
     // Log sample of filtered results to see what we're working with
     console.log(`  → Sample filtered results: ${filtered.slice(0, 5).map(p => `"${p.name}" (id: ${p.medicine_id})`).join(', ')}`);
 
@@ -789,6 +791,17 @@ export const findMedicinesByComposition = async (composition, preferredForm = nu
           // Basic info - no detailed fields
           _isFromPriceData: true
         };
+      } else if (formLower) {
+        // When we requested a specific form (e.g. Injection) but DB returned a different form (e.g. Tablet),
+        // prefer the price row name so we show the correct form (e.g. "Abhope 50mg Injection" not "ABHOPE 300MG TABLET")
+        const medName = (medicine.name || medicine.medicine_name || '').toLowerCase();
+        const formMismatch =
+          (formLower === 'injection' && (medName.includes('tablet') || medName.includes('tab'))) ||
+          (formLower === 'tablet' && (medName.includes('injection') || medName.includes('inj')));
+        if (formMismatch && priceRow.name) {
+          console.log(`  → Form mismatch: DB has "${medicine.name}", price row has "${priceRow.name}" — using price row name`);
+          medicine = { ...medicine, name: priceRow.name, medicine_name: priceRow.name };
+        }
       }
       
       // Add dosage info for ranking
@@ -810,7 +823,6 @@ export const findMedicinesByComposition = async (composition, preferredForm = nu
     if (medicines.length === 0) return { primary: null, alternatives: [] };
 
     // STRICT FORM FILTERING: When form is specified (e.g., "Injection"), only return matching forms
-    const formLower = preferredForm ? preferredForm.toLowerCase() : null;
     let filteredByForm = medicines;
     
     if (formLower) {

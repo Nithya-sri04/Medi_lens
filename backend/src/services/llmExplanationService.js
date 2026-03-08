@@ -95,7 +95,12 @@ Keep explanations concise, patient-friendly, in proper English. Do not mention s
         }
       }
       console.log('Parsed explanations:', explanations);
-      return explanations;
+      // Normalize to string[] (LLM may return objects like { explanation: "..." })
+      return explanations.map((item) => {
+        if (typeof item === 'string') return item.trim();
+        if (item && typeof item === 'object') return String(item.explanation || item.text || item.content || '').trim();
+        return '';
+      });
     } catch (error) {
       console.error('Error calling Groq API:', error);
       throw new Error('Failed to generate explanations');
